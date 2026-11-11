@@ -1,0 +1,3371 @@
+--[[ ================================================================
+        AURAX HUB  ·  ULTIMATE PRO  —  FIXED & POLISHED EDITION
+        Client-Side Visual Suite  ·  Mobile & PC  ·  v3.1
+    ----------------------------------------------------------------
+      * 100% client-side (LocalScript). Nothing replicates to server.
+      * PC (mouse + keyboard) and Mobile (touch gestures) supported.
+      * Toggle: RightShift  |  Draggable floating orb button.
+      * Unload: Settings tab button, or call _G.__AURAX_PRO_UNLOAD()
+      * Human-crafted compact dark-glass UI. No pets. No wings.
+    ----------------------------------------------------------------
+      WHAT'S NEW IN v3.1 (FIXED & POLISHED)
+        + INTRO / ACTIVATION animation: a branded glass splash
+          springs in (Back easing + CanvasGroup fade) when the
+          script loads, plays its progress bar + halo ripple, then
+          hands off to the menu's spring entrance automatically.
+        + Open-from-minimized now tweens the window height back up
+          with Back easing - no snap, no layout shift.
+        + Viewport-resize safety: floating orb and window re-clamp
+          into view on resolution / rotation changes.
+      CARRIED FROM v3.0 (STILL FIXED & POLISHED)
+        + Whole-window CanvasGroup open/close/minimize fades with
+          Back/Quad easing + spam-proof state tokens.
+        + Toggle switches: Back-eased knob travel + accent glow
+          ring; labels truncated clear of the switch (no overlap).
+        + Jump Circle is a TRUE HOLLOW ring (empty cut-out
+          center): 24 neon segments form a donut border that
+          expands + fades on a hardened raycast valid on any
+          terrain, slope or material.
+        + Self Chams: translucent colored-glass body with a smooth
+          shifting RGB / rainbow cycle option.
+        + Theme customizer: instant accent switching (5 presets +
+          live Custom RGB sliders with a hex preview swatch).
+        + Preview panel shows a live FPS / ping readout.
+      PRESERVED PRISTINE
+        Traditional China Hat (spin + RGB), Elemental Orbs,
+        Footstep Sparks, Click Sparks, Custom Cursor + trail glow,
+        Cinematic Letterbox, Aspect Framing, Motion Blur, FOV,
+        Storm Weather, Lightning, Fog, Time of Day, Sky Presets,
+        embedded rotating character preview, full Unload.
+    ----------------------------------------------------------------
+      MODULES
+        Player  : Self Chams (Glass + Rainbow), China Hat (spin + RGB),
+                  Hollow Jump Circle (fixed raycast + dual triggers)
+        Effects : Elemental Orbs, Footstep Sparks, Click Sparks,
+                  Custom Cursor (styles, size, trail glow)
+        Camera  : Cinematic Letterbox, Aspect Framing, Motion Blur, FOV
+        World   : Rain, Lightning, Fog, Time of Day, Sky Presets
+        Settings: Theme Customizer (5 presets + Custom RGB), UI Blur
+    ================================================================ ]]
+
+-- // SERVICES ------------------------------------------------------
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting         = game:GetService("Lighting")
+local Workspace        = game:GetService("Workspace")
+local Debris           = game:GetService("Debris")
+
+local LocalPlayer = Players.LocalPlayer
+local VERSION     = "3.1"
+local RNG         = Random.new()
+
+-- // DOUBLE-EXECUTION GUARD ----------------------------------------
+if _G.__AURAX_PRO_UNLOAD then
+    pcall(_G.__AURAX_PRO_UNLOAD)
+end
+
+-- // FORWARD DECLARATIONS (assigned later in this file) -------------
+local SetMenu, ToggleMenu, MinimizeMenu, CloseAllDropdowns
+local BuildPreview
+local Notify
+local SetChams, SetChamsGlass, RestoreGlass
+local SetHat, SetOrbs, SetOrbCount
+local SetFootSparks, SetClickSparks
+local SetCursor, SetCursorStyle, SetCursorSize
+local SetLetterbox, SetAspect, SetMotionBlur, SetFOV
+local SetRain, SetRainIntensity, SetLightning, SetFog, SetFogDensity, SetTimeOfDay, ApplySkyPreset
+local HandleCharacter
+local Unload
+
+local ToggleSetters = {} -- syncKey -> visual setter (cross-control sync)
+
+-- // SETTINGS (defaults) --------------------------------------------
+local Settings = {
+    -- interface
+    Theme    = "Neon Purple",
+    CustomR  = 120, CustomG = 200, CustomB = 255,
+    UIBlur   = true,
+    -- self visuals
+    Chams       = false,
+    ChamGlass   = false,
+    ChamRainbow = false,
+    ChamColor   = "Theme",
+    JumpCircle  = false,
+    Hat     = false,
+    HatSpin = 55,
+    HatRGB  = false,
+    Orbs      = false,
+    OrbCount  = 4,
+    OrbRainbow = false,
+    FootSparks    = false,
+    SparkIntensity = 1,
+    ClickSparks = false,
+    ClickBurst  = 1,
+    Cursor      = false,
+    CursorStyle = "Dot",
+    CursorSize  = 1,
+    CursorTrail = true,
+    CursorColor = "Theme",
+    -- camera
+    Letterbox       = false,
+    LetterboxHeight = 12,
+    AspectMode      = "Off",
+    MotionBlur      = false,
+    BlurBase        = 8,
+    -- world
+    Rain          = false,
+    RainIntensity = 0.5,
+    Lightning     = false,
+    Fog           = false,
+    FogDensity    = 0.5,
+    TimeOfDay     = 13.5,
+    SkyPreset     = "Roblox Default",
+}
+
+local MenuState = "closed" -- "closed" | "open" | "minimized"
+
+-- // CLEANUP REGISTRY (powers the complete Unload) -------------------
+local Registry = {
+    connections = {}, -- RBXScriptConnections to disconnect
+    objects     = {}, -- Instances to destroy
+    tasks       = {}, -- custom stop/cleanup callbacks
+}
+
+local function TrackConnection(conn)
+    if conn then table.insert(Registry.connections, conn) end
+    return conn
+end
+
+local function TrackObject(inst)
+    if inst then table.insert(Registry.objects, inst) end
+    return inst
+end
+
+local function TrackTask(fn)
+    if fn then table.insert(Registry.tasks, fn) end
+end
+
+-- Safe instance factory: per-property pcall so one bad prop on an
+-- exotic executor can never break the whole build. Track = false for
+-- short-lived ephemeral objects (rings, bursts, toasts).
+local function New(className, props, parent, track)
+    local inst = Instance.new(className)
+    if props then
+        for k, v in pairs(props) do
+            local ok = pcall(function() inst[k] = v end)
+            if not ok then
+                warn("[AuraX] skipped unsupported property: " .. className .. "." .. tostring(k))
+            end
+        end
+    end
+    if parent then
+        local ok = pcall(function() inst.Parent = parent end)
+        if not ok then
+            warn("[AuraX] could not parent: " .. className)
+            pcall(function() inst:Destroy() end)
+            return nil
+        end
+    end
+    if track ~= false then TrackObject(inst) end
+    return inst
+end
+
+-- // SMALL UTILITIES -------------------------------------------------
+local TI = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+local function Tween(inst, props, ti)
+    if not inst then return nil end
+    local ok, tw = pcall(function()
+        return TweenService:Create(inst, ti or TI, props)
+    end)
+    if ok and tw then
+        tw:Play()
+        return tw
+    end
+    return nil
+end
+
+local function GetCam()
+    return Workspace.CurrentCamera
+end
+
+local function Lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+-- Palette (dark glass theme)
+local COL = {
+    BG     = Color3.fromRGB(11, 12, 19),
+    PANEL  = Color3.fromRGB(15, 16, 25),
+    ROW    = Color3.fromRGB(19, 21, 32),
+    TEXT   = Color3.fromRGB(235, 237, 245),
+    SUB    = Color3.fromRGB(128, 133, 152),
+    LINE   = Color3.fromRGB(255, 255, 255),
+    DANGER = Color3.fromRGB(255, 92, 92),
+}
+
+-- // CENTRAL FRAME UPDATER (single connection, error-capped) ---------
+local Updaters    = {}
+local FailCounts  = {}
+
+local function AddUpdater(fn)
+    table.insert(Updaters, fn)
+    FailCounts[#Updaters] = 0
+end
+
+TrackConnection(RunService.RenderStepped:Connect(function(dt)
+    local t = os.clock()
+    for i = 1, #Updaters do
+        local fn = Updaters[i]
+        if fn then
+            local ok, err = pcall(fn, dt, t)
+            if not ok then
+                FailCounts[i] = (FailCounts[i] or 0) + 1
+                if FailCounts[i] == 1 then
+                    warn("[AuraX] updater error (suppressed): " .. tostring(err))
+                end
+                if FailCounts[i] >= 10 then
+                    Updaters[i] = function() end -- auto-disable, never spam console
+                    pcall(function() Notify("A module errored out and was disabled", "warn") end)
+                end
+            end
+        end
+    end
+end))
+
+-- // THEME SYSTEM ------------------------------------------------------
+local Themes = {
+    ["Neon Purple"] = Color3.fromRGB(168, 85, 247),
+    ["Cyan"]        = Color3.fromRGB(56, 214, 250),
+    ["Emerald"]     = Color3.fromRGB(64, 220, 160),
+    ["Sunset"]      = Color3.fromRGB(255, 128, 110),
+    ["Custom"]      = Color3.fromRGB(120, 200, 255),
+}
+
+local function Soften(c)
+    return Color3.new(c.R * 0.62, c.G * 0.62, c.B * 0.62)
+end
+
+local ThemeState = {
+    Accent = Themes["Neon Purple"],
+    Soft   = Soften(Themes["Neon Purple"]),
+}
+
+local ThemedItems = {} -- {obj, kind}: stroke|fill|text|grad|part|scroll|viewport
+local ThemeHooks  = {} -- extra callbacks on theme change (preset rings, etc.)
+
+local function MarkTheme(inst, kind)
+    if inst then table.insert(ThemedItems, {obj = inst, kind = kind}) end
+end
+
+local function AddThemeHook(fn)
+    if fn then table.insert(ThemeHooks, fn) end
+end
+
+local function ApplyTheme(name)
+    local accent
+    if name == "Custom" then
+        accent = Color3.fromRGB(
+            math.clamp(Settings.CustomR, 0, 255),
+            math.clamp(Settings.CustomG, 0, 255),
+            math.clamp(Settings.CustomB, 0, 255)
+        )
+    else
+        accent = Themes[name] or Themes["Neon Purple"]
+    end
+    Settings.Theme    = name
+    ThemeState.Accent = accent
+    ThemeState.Soft   = Soften(accent)
+
+    for i = 1, #ThemedItems do
+        local item = ThemedItems[i]
+        local obj  = item.obj
+        if obj and obj.Parent then
+            pcall(function()
+                if item.kind == "stroke" then
+                    Tween(obj, {Color = accent})
+                elseif item.kind == "fill" then
+                    Tween(obj, {BackgroundColor3 = accent})
+                elseif item.kind == "text" then
+                    Tween(obj, {TextColor3 = accent})
+                elseif item.kind == "grad" then
+                    obj.Color = ColorSequence.new(accent, ThemeState.Soft)
+                elseif item.kind == "part" then
+                    Tween(obj, {Color = accent})
+                elseif item.kind == "scroll" then
+                    obj.ScrollBarImageColor3 = accent
+                elseif item.kind == "viewport" then
+                    obj.Ambient    = Color3.new(0.14 + accent.R * 0.20, 0.14 + accent.G * 0.20, 0.17 + accent.B * 0.20)
+                    obj.LightColor = accent:Lerp(Color3.new(1, 1, 1), 0.55)
+                end
+            end)
+        end
+    end
+
+    for i = 1, #ThemeHooks do
+        pcall(ThemeHooks[i], name, accent)
+    end
+end
+
+-- // CHARACTER TRACKING ------------------------------------------------
+-- NOTE: we never touch Motor6D.Transform on the live character. All
+-- skeletal/motor work is avoided by design (no "motor transform" errors).
+local Char = { character = nil, humanoid = nil, root = nil }
+
+local CharacterHooks = {} -- fn(ch) re-apply character-bound FX on respawn
+local ScriptReady    = false
+
+local function AddCharHook(fn)
+    if fn then table.insert(CharacterHooks, fn) end
+end
+
+local function RunCharacterHooks(ch)
+    for i = 1, #CharacterHooks do
+        local ok, err = pcall(CharacterHooks[i], ch)
+        if not ok then
+            warn("[AuraX] character hook error (suppressed): " .. tostring(err))
+        end
+    end
+end
+
+HandleCharacter = function(ch)
+    if not ch then return end
+    Char.character = ch
+    Char.humanoid  = nil
+    Char.root      = nil
+    task.spawn(function()
+        local okH, h = pcall(function()
+            return ch:FindFirstChildOfClass("Humanoid") or ch:WaitForChild("Humanoid", 8)
+        end)
+        local okR, r = pcall(function()
+            return ch:WaitForChild("HumanoidRootPart", 8)
+        end)
+        Char.humanoid = (okH and h) or nil
+        Char.root     = (okR and r) or nil
+        if ScriptReady then
+            RunCharacterHooks(ch)
+        end
+    end)
+    if ScriptReady then
+        RunCharacterHooks(ch)
+    end
+end
+
+TrackConnection(LocalPlayer.CharacterAdded:Connect(HandleCharacter))
+TrackConnection(LocalPlayer.CharacterRemoving:Connect(function()
+    Char.character = nil
+    Char.humanoid  = nil
+    Char.root      = nil
+end))
+
+-- // CLIENT FX ROOT -----------------------------------------------------
+local FXFolder = New("Folder", {Name = "AuraXFX_Pro"}, Workspace)
+
+-- // LIGHTING SNAPSHOT (restored exactly on Unload) ---------------------
+local OriginalLighting = {
+    Brightness          = Lighting.Brightness,
+    Ambient             = Lighting.Ambient,
+    OutdoorAmbient      = Lighting.OutdoorAmbient,
+    ClockTime           = Lighting.ClockTime,
+    FogColor            = Lighting.FogColor,
+    FogEnd              = Lighting.FogEnd,
+    FogStart            = Lighting.FogStart,
+    GlobalShadows       = Lighting.GlobalShadows,
+    ExposureCompensation = Lighting.ExposureCompensation,
+}
+
+local OriginalAtmosphere = nil
+pcall(function()
+    OriginalAtmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
+end)
+local OriginalAtmoProps = nil
+if OriginalAtmosphere then
+    OriginalAtmoProps = {
+        Density = OriginalAtmosphere.Density,
+        Offset  = OriginalAtmosphere.Offset,
+        Color   = OriginalAtmosphere.Color,
+        Decay   = OriginalAtmosphere.Decay,
+        Glare   = OriginalAtmosphere.Glare,
+        Haze    = OriginalAtmosphere.Haze,
+    }
+end
+
+local OriginalSky = nil
+pcall(function()
+    OriginalSky = Lighting:FindFirstChildOfClass("Sky")
+end)
+local OriginalSkyProps = nil
+if OriginalSky then
+    OriginalSkyProps = {
+        StarCount              = OriginalSky.StarCount,
+        SunAngularSize         = OriginalSky.SunAngularSize,
+        MoonAngularSize        = OriginalSky.MoonAngularSize,
+        CelestialBodiesShown   = OriginalSky.CelestialBodiesShown,
+    }
+end
+
+local OriginalFOV = 70
+pcall(function()
+    local cam = Workspace.CurrentCamera
+    if cam then OriginalFOV = cam.FieldOfView end
+end)
+
+-- =====================================================================
+-- PART 2 · UI FRAMEWORK (glass window, tabs, controls, preview, orb)
+-- =====================================================================
+
+-- // GUI PARENT RESOLUTION --------------------------------------------
+local function ResolveGuiParent()
+    local ok, hui = pcall(function()
+        if type(gethui) == "function" then return gethui() end
+        return nil
+    end)
+    if ok and hui then return hui end
+
+    local CoreGui = game:GetService("CoreGui")
+    local canCore = pcall(function()
+        local probe = Instance.new("Folder")
+        probe.Name = "_aura_probe"
+        probe.Parent = CoreGui
+        probe:Destroy()
+    end)
+    if canCore then return CoreGui end
+
+    return LocalPlayer.PlayerGui
+end
+
+local GuiParent = ResolveGuiParent()
+
+local function ParentGui(gui)
+    if type(syn) == "table" and type(syn.protect_gui) == "function" then
+        pcall(syn.protect_gui, gui)
+    end
+    local ok = pcall(function() gui.Parent = GuiParent end)
+    if not ok then
+        pcall(function() gui.Parent = LocalPlayer.PlayerGui end)
+    end
+end
+
+-- // ROOT SCREENGUIS ---------------------------------------------------
+local MainGui = New("ScreenGui", {
+    Name = "AuraXHub_Main", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 100, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+local ToastGui = New("ScreenGui", {
+    Name = "AuraXHub_Toasts", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 300, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+local FloatGui = New("ScreenGui", {
+    Name = "AuraXHub_Float", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 400, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+ParentGui(MainGui); ParentGui(ToastGui); ParentGui(FloatGui)
+
+-- // WINDOW GEOMETRY ---------------------------------------------------
+local WINDOW_W, WINDOW_H = 612, 436
+local vp0 = Vector2.new(1280, 720)
+pcall(function()
+    local c = GetCam()
+    if c then vp0 = c.ViewportSize end
+end)
+local COMPACT   = vp0.X < 620
+local PREVIEW_W = COMPACT and 0 or 170
+local BaseScale = math.clamp(math.min(1, (vp0.X - 14) / WINDOW_W, (vp0.Y - 14) / WINDOW_H), 0.55, 1)
+
+-- CanvasGroup lets the whole window fade with GroupTransparency for
+-- buttery open/close animation. Graceful fallback to a plain Frame
+-- on executors that lack CanvasGroup.
+local WindowCanvasOK = pcall(function()
+    local probe = Instance.new("CanvasGroup")
+    probe:Destroy()
+end)
+local Window = New(WindowCanvasOK and "CanvasGroup" or "Frame", {
+    Name = "Window", Size = UDim2.fromOffset(WINDOW_W, WINDOW_H),
+    Position = UDim2.fromOffset(
+        math.floor((vp0.X - WINDOW_W * BaseScale) / 2),
+        math.max(6, math.floor((vp0.Y - WINDOW_H * BaseScale) / 2) - 8)
+    ),
+    BackgroundColor3 = COL.BG, BackgroundTransparency = 0.06,
+    BorderSizePixel = 0, Active = true, Visible = false,
+}, MainGui)
+New("UICorner", {CornerRadius = UDim.new(0, 14)}, Window)
+local WindowStroke = New("UIStroke", {
+    Color = ThemeState.Accent, Transparency = 0.45, Thickness = 1.4,
+}, Window)
+MarkTheme(WindowStroke, "stroke")
+
+-- top sheen (very subtle glass light)
+local Sheen = New("Frame", {
+    Size = UDim2.new(1, 0, 0, 64), BackgroundColor3 = Color3.new(1, 1, 1),
+    BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 2,
+}, Window)
+New("UICorner", {CornerRadius = UDim.new(0, 14)}, Sheen)
+New("UIGradient", {
+    Rotation = 90,
+    Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.93),
+        NumberSequenceKeypoint.new(1, 1),
+    }),
+}, Sheen)
+
+local WindowScale = New("UIScale", {Scale = BaseScale}, Window)
+
+-- // TITLE BAR ----------------------------------------------------------
+local TitleBar = New("Frame", {
+    Size = UDim2.new(1, 0, 0, 44), BackgroundTransparency = 1,
+    BorderSizePixel = 0, Active = true,
+}, Window)
+
+local LogoDot = New("Frame", {
+    Position = UDim2.fromOffset(16, 18), Size = UDim2.fromOffset(9, 9),
+    BackgroundColor3 = ThemeState.Accent, BorderSizePixel = 0,
+}, TitleBar)
+New("UICorner", {CornerRadius = UDim.new(1, 0)}, LogoDot)
+MarkTheme(LogoDot, "fill")
+
+New("TextLabel", {
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(34, 0),
+    Size = UDim2.fromOffset(150, 44), Font = Enum.Font.GothamBlack,
+    Text = "AURAX HUB", TextSize = 15, TextColor3 = COL.TEXT,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, TitleBar)
+
+local Badge = New("Frame", {
+    Position = UDim2.fromOffset(146, 14), Size = UDim2.fromOffset(96, 17),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+}, TitleBar)
+New("UICorner", {CornerRadius = UDim.new(1, 0)}, Badge)
+local BadgeStroke = New("UIStroke", {
+    Color = ThemeState.Accent, Transparency = 0.45, Thickness = 1,
+}, Badge)
+MarkTheme(BadgeStroke, "stroke")
+local BadgeText = New("TextLabel", {
+    BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0),
+    Font = Enum.Font.GothamBold, Text = "ULTIMATE PRO", TextSize = 8,
+    TextColor3 = ThemeState.Accent,
+}, Badge)
+MarkTheme(BadgeText, "text")
+
+local function CircleButton(parent, xoff, glyph)
+    local b = New("TextButton", {
+        AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(1, xoff, 0.5, 0),
+        Size = UDim2.fromOffset(26, 26), BackgroundColor3 = Color3.fromRGB(22, 24, 36),
+        BackgroundTransparency = 0.2, AutoButtonColor = false,
+        Text = glyph, Font = Enum.Font.GothamBold, TextSize = 13,
+        TextColor3 = COL.SUB, BorderSizePixel = 0,
+    }, parent)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, b)
+    New("UIStroke", {Color = COL.LINE, Transparency = 0.92, Thickness = 1}, b)
+    b.MouseEnter:Connect(function() Tween(b, {BackgroundColor3 = Color3.fromRGB(34, 37, 54)}) end)
+    b.MouseLeave:Connect(function() Tween(b, {BackgroundColor3 = Color3.fromRGB(22, 24, 36)}) end)
+    return b
+end
+
+local CloseBtn = CircleButton(TitleBar, -14, "×")
+local MinBtn   = CircleButton(TitleBar, -46, "–")
+
+-- // BODY / TABS ---------------------------------------------------------
+-- Body is also a CanvasGroup so minimize can cross-fade the content
+-- instead of hard-hiding it (no pop, no layout shift).
+local Body = New(WindowCanvasOK and "CanvasGroup" or "Frame", {
+    Position = UDim2.fromOffset(0, 44), Size = UDim2.new(1, 0, 1, -44),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+}, Window)
+
+local TabRail = New("Frame", {
+    Position = UDim2.fromOffset(8, 6), Size = UDim2.new(0, 54, 1, -14),
+    BackgroundColor3 = COL.ROW, BackgroundTransparency = 0.45,
+    BorderSizePixel = 0,
+}, Body)
+New("UICorner", {CornerRadius = UDim.new(0, 12)}, TabRail)
+New("UIStroke", {Color = COL.LINE, Transparency = 0.94, Thickness = 1}, TabRail)
+
+local TabDefs = {
+    {"PL",  "PLAYER"},
+    {"FX",  "EFFECTS"},
+    {"CAM", "CAMERA"},
+    {"WLD", "WORLD"},
+    {"SET", "SETTINGS"},
+}
+local TabButtons = {}
+local TabMeta    = {}
+local CurrentTabIdx = 1
+
+local function StyleTabButton(idx, active)
+    local meta = TabMeta[idx]
+    if not meta then return end
+    Tween(meta.btn, {BackgroundColor3 = active and Color3.new(1, 1, 1) or Color3.fromRGB(17, 19, 30)}, 0.16)
+    meta.label.TextColor3 = active and Color3.new(1, 1, 1) or COL.SUB
+    meta.stroke.Color = active and ThemeState.Accent or COL.LINE
+    meta.stroke.Transparency = active and 0.35 or 0.94
+end
+
+for i = 1, #TabDefs do
+    local btn = New("TextButton", {
+        Position = UDim2.new(0.5, 0, 0, 6 + (i - 1) * 50),
+        AnchorPoint = Vector2.new(0.5, 0),
+        Size = UDim2.fromOffset(42, 42), BackgroundColor3 = Color3.fromRGB(17, 19, 30),
+        BackgroundTransparency = 0.15, AutoButtonColor = false,
+        Text = "", BorderSizePixel = 0,
+    }, TabRail)
+    New("UICorner", {CornerRadius = UDim.new(0, 11)}, btn)
+    local label = New("TextLabel", {
+        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), ZIndex = 2,
+        Font = Enum.Font.GothamBold, Text = TabDefs[i][1], TextSize = 10,
+        TextColor3 = COL.SUB,
+    }, btn)
+    local st = New("UIStroke", {Color = COL.LINE, Transparency = 0.94, Thickness = 1}, btn)
+    TabMeta[i] = {btn = btn, label = label, stroke = st}
+    btn.MouseEnter:Connect(function()
+        if CurrentTabIdx ~= i then Tween(label, {TextColor3 = COL.TEXT}, 0.12) end
+    end)
+    btn.MouseLeave:Connect(function()
+        if CurrentTabIdx ~= i then Tween(label, {TextColor3 = COL.SUB}, 0.12) end
+    end)
+    TabButtons[i] = btn
+end
+
+-- // CONTENT AREA --------------------------------------------------------
+local CONTENT_X = 70
+local ContentArea = New("Frame", {
+    Position = UDim2.fromOffset(CONTENT_X, 6),
+    Size = UDim2.new(1, -(CONTENT_X + PREVIEW_W + 10), 1, -14),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+}, Body)
+
+local ContentTitle = New("TextLabel", {
+    BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20),
+    Font = Enum.Font.GothamBold, Text = "PLAYER", TextSize = 12,
+    TextColor3 = COL.TEXT, TextXAlignment = Enum.TextXAlignment.Left,
+}, ContentArea)
+local TitleUnderline = New("Frame", {
+    Position = UDim2.fromOffset(0, 20), Size = UDim2.fromOffset(30, 2),
+    BackgroundColor3 = ThemeState.Accent, BorderSizePixel = 0,
+}, ContentArea)
+MarkTheme(TitleUnderline, "fill")
+
+local Pages = {}
+for i = 1, #TabDefs do
+    local page = New("ScrollingFrame", {
+        Position = UDim2.fromOffset(0, 30), Size = UDim2.new(1, -4, 1, -32),
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 2, ScrollBarImageTransparency = 0.35,
+        VerticalScrollBarInset = Enum.ScrollBarInset.None,
+        Visible = (i == 1),
+    }, ContentArea)
+    New("UIListLayout", {
+        Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, page)
+    MarkTheme(page, "scroll")
+    Pages[i] = page
+end
+
+local function SelectTab(idx)
+    CurrentTabIdx = idx
+    for i = 1, #Pages do
+        Pages[i].Visible = (i == idx)
+        StyleTabButton(i, i == idx)
+    end
+    ContentTitle.Text = TabDefs[idx][2]
+    if CloseAllDropdowns then pcall(CloseAllDropdowns) end
+end
+
+for i = 1, #TabButtons do
+    local idx = i
+    TabButtons[i].Activated:Connect(function() SelectTab(idx) end)
+end
+
+-- keep the active tab pill accent-colored after theme changes
+AddThemeHook(function()
+    StyleTabButton(CurrentTabIdx, true)
+end)
+
+-- switched-on toggle strokes follow the accent color too
+local SwitchStrokes = {}
+AddThemeHook(function()
+    for i = 1, #SwitchStrokes do
+        local e = SwitchStrokes[i]
+        pcall(function()
+            if e.get() then
+                e.stroke.Color = ThemeState.Accent
+                e.stroke.Transparency = 0.3
+            end
+        end)
+    end
+end)
+
+-- // PREVIEW PANEL (embedded character viewport) -------------------------
+local PreviewPanel = nil
+local PreviewViewport, PreviewWorld, PreviewCam
+local PreviewModel, PreviewHeight = nil, 4
+local PreviewDisc, PreviewOrbA, PreviewOrbB
+local LiveDot, PreviewName, StatsLabel
+
+if not COMPACT then
+    PreviewPanel = New("Frame", {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 6),
+        Size = UDim2.new(0, PREVIEW_W, 1, -14),
+        BackgroundColor3 = COL.PANEL, BackgroundTransparency = 0.25,
+        BorderSizePixel = 0,
+    }, Body)
+    New("UICorner", {CornerRadius = UDim.new(0, 12)}, PreviewPanel)
+    New("UIStroke", {Color = COL.LINE, Transparency = 0.93, Thickness = 1}, PreviewPanel)
+
+    New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 6),
+        Size = UDim2.fromOffset(70, 16), Font = Enum.Font.GothamBold,
+        Text = "PREVIEW", TextSize = 9, TextColor3 = COL.SUB,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, PreviewPanel)
+
+    LiveDot = New("Frame", {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -34, 0, 14),
+        Size = UDim2.fromOffset(6, 6), BackgroundColor3 = ThemeState.Accent,
+        BorderSizePixel = 0,
+    }, PreviewPanel)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, LiveDot)
+    MarkTheme(LiveDot, "fill")
+
+    local liveTxt = New("TextLabel", {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0, 14),
+        Size = UDim2.fromOffset(22, 12), BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold, Text = "LIVE", TextSize = 8,
+        TextColor3 = ThemeState.Accent, TextXAlignment = Enum.TextXAlignment.Right,
+    }, PreviewPanel)
+    MarkTheme(liveTxt, "text")
+
+    PreviewViewport = New("ViewportFrame", {
+        Position = UDim2.fromOffset(10, 26), Size = UDim2.new(1, -20, 0, 196),
+        BackgroundColor3 = Color3.fromRGB(7, 8, 13), BorderSizePixel = 0,
+        Ambient = Color3.fromRGB(80, 80, 110), LightColor = Color3.fromRGB(220, 220, 255),
+        LightDirection = Vector3.new(-0.4, 0.8, 0.5),
+    }, PreviewPanel)
+    New("UICorner", {CornerRadius = UDim.new(0, 10)}, PreviewViewport)
+    MarkTheme(PreviewViewport, "viewport")
+
+    PreviewWorld = New("WorldModel", {}, PreviewViewport, false)
+    PreviewCam = New("Camera", {FieldOfView = 40}, PreviewViewport, false)
+    pcall(function() PreviewViewport.CurrentCamera = PreviewCam end)
+
+    -- ambient stage: glowing disc + two floating accent motes
+    PreviewDisc = New("Part", {
+        Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.12, 4.4, 4.4),
+        CFrame = CFrame.new(0, 0.06, 0) * CFrame.Angles(0, 0, math.rad(90)),
+        Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false,
+        Material = Enum.Material.Neon, Color = ThemeState.Accent,
+        Transparency = 0.5, CastShadow = false,
+    }, PreviewWorld, false)
+    MarkTheme(PreviewDisc, "part")
+
+    PreviewOrbA = New("Part", {
+        Shape = Enum.PartType.Ball, Size = Vector3.new(0.24, 0.24, 0.24),
+        CFrame = CFrame.new(1.7, 1, 0), Anchored = true, CanCollide = false,
+        CanQuery = false, Material = Enum.Material.Neon,
+        Color = ThemeState.Accent, CastShadow = false,
+    }, PreviewWorld, false)
+    MarkTheme(PreviewOrbA, "part")
+
+    PreviewOrbB = New("Part", {
+        Shape = Enum.PartType.Ball, Size = Vector3.new(0.18, 0.18, 0.18),
+        CFrame = CFrame.new(-1.7, 1.8, 0), Anchored = true, CanCollide = false,
+        CanQuery = false, Material = Enum.Material.Neon,
+        Color = ThemeState.Soft, CastShadow = false,
+    }, PreviewWorld, false)
+    MarkTheme(PreviewOrbB, "part")
+
+    PreviewName = New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 228),
+        Size = UDim2.new(1, -20, 0, 16), Font = Enum.Font.GothamBold,
+        Text = "loading character...", TextSize = 11, TextColor3 = COL.TEXT,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, PreviewPanel)
+
+    local RefreshBtn = New("TextButton", {
+        Position = UDim2.fromOffset(10, 248), Size = UDim2.new(1, -20, 0, 22),
+        BackgroundColor3 = COL.ROW, BackgroundTransparency = 0.3,
+        AutoButtonColor = false, Text = "REFRESH", Font = Enum.Font.GothamBold,
+        TextSize = 9, TextColor3 = COL.SUB, BorderSizePixel = 0,
+    }, PreviewPanel)
+    New("UICorner", {CornerRadius = UDim.new(0, 8)}, RefreshBtn)
+    New("UIStroke", {Color = COL.LINE, Transparency = 0.93, Thickness = 1}, RefreshBtn)
+    RefreshBtn.Activated:Connect(function()
+        pcall(BuildPreview)
+    end)
+
+    -- live session readout (FPS + ping) under the viewport
+    StatsLabel = New("TextLabel", {
+        Position = UDim2.fromOffset(12, 276), Size = UDim2.new(1, -22, 0, 16),
+        BackgroundTransparency = 1, Font = Enum.Font.Code,
+        Text = "FPS --   ·   -- MS", TextSize = 10, TextColor3 = COL.SUB,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, PreviewPanel)
+end
+
+BuildPreview = function()
+    pcall(function()
+        if not PreviewViewport then return end
+        if PreviewModel then
+            pcall(function() PreviewModel:Destroy() end)
+            PreviewModel = nil
+        end
+        local ch = LocalPlayer.Character
+        if not (ch and ch.Parent) then
+            if PreviewName then PreviewName.Text = "waiting for character..." end
+            return
+        end
+        ch.Archivable = true
+        local clone = ch:Clone()
+        if not clone then
+            if PreviewName then PreviewName.Text = "clone failed" end
+            return
+        end
+        for _, d in ipairs(clone:GetDescendants()) do
+            if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") or d:IsA("Sound") or d:IsA("Highlight") then
+                d:Destroy()
+            elseif d:IsA("BasePart") then
+                pcall(function() d.Anchored = true end)
+            end
+        end
+        local hum = clone:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None end)
+        end
+        -- R6 rigs rest in a T-pose; fold the arms down into a calm stance
+        if clone:FindFirstChild("Torso") then
+            local rs = clone:FindFirstChild("Right Shoulder")
+            local ls = clone:FindFirstChild("Left Shoulder")
+            if rs and rs:IsA("Motor6D") then
+                pcall(function() rs.Transform = CFrame.Angles(math.rad(92), 0, 0) end)
+            end
+            if ls and ls:IsA("Motor6D") then
+                pcall(function() ls.Transform = CFrame.Angles(math.rad(92), 0, 0) end)
+            end
+        end
+        local size = clone:GetExtentsSize()
+        PreviewHeight = math.max(size.Y, 2)
+        clone:PivotTo(CFrame.new(0, PreviewHeight / 2 + 0.05, 0))
+        clone.Parent = PreviewWorld
+        PreviewModel = clone
+        pcall(function()
+            PreviewCam.CFrame = CFrame.lookAt(
+                Vector3.new(0.4, PreviewHeight * 0.64, -PreviewHeight * 2.15),
+                Vector3.new(0, PreviewHeight * 0.5, 0)
+            )
+        end)
+        if PreviewName then PreviewName.Text = LocalPlayer.Name end
+    end)
+end
+
+AddCharHook(function()
+    task.delay(0.7, function() pcall(BuildPreview) end)
+end)
+
+AddUpdater(function(dt, t)
+    if MenuState == "closed" then return end
+    if not PreviewViewport then return end
+    if PreviewModel and PreviewModel.Parent then
+        PreviewModel:PivotTo(CFrame.new(0, PreviewHeight / 2 + 0.05, 0) * CFrame.Angles(0, t * 0.85, 0))
+    end
+    if PreviewDisc then
+        PreviewDisc.Transparency = 0.42 + 0.22 * math.abs(math.sin(t * 1.6))
+    end
+    if PreviewOrbA and PreviewOrbA.Parent then
+        PreviewOrbA.CFrame = CFrame.new(math.cos(t * 1.05) * 1.75, 1.0 + math.sin(t * 1.6) * 0.45, math.sin(t * 1.05) * 1.75)
+    end
+    if PreviewOrbB and PreviewOrbB.Parent then
+        PreviewOrbB.CFrame = CFrame.new(math.cos(t * 1.05 + 3.14159) * 1.75, 1.7 + math.cos(t * 1.3) * 0.45, math.sin(t * 1.05 + 3.14159) * 1.75)
+    end
+    pcall(function()
+        PreviewViewport.LightDirection = Vector3.new(math.cos(t * 0.5) * 0.8, 0.75, math.sin(t * 0.5) * 0.8)
+    end)
+    if LiveDot then
+        LiveDot.BackgroundTransparency = 0.05 + 0.45 * (0.5 + 0.5 * math.sin(t * 3))
+    end
+end)
+
+-- // LIVE FPS / PING READOUT (preview panel) ------------------------------
+local FPSsmooth, StatsClock = 60, 0
+AddUpdater(function(dt)
+    if not StatsLabel then return end
+    if dt and dt > 0 then
+        local inst = math.clamp(1 / dt, 5, 240)
+        FPSsmooth = FPSsmooth + (inst - FPSsmooth) * math.min(dt * 2.5, 1)
+    end
+    StatsClock = StatsClock + dt
+    if StatsClock >= 0.5 then
+        StatsClock = 0
+        local ping = 0
+        pcall(function() ping = math.floor(LocalPlayer:GetNetworkPing() * 1000 + 0.5) end)
+        pcall(function()
+            StatsLabel.Text = string.format("FPS %d   ·   %d MS", math.floor(FPSsmooth + 0.5), ping)
+        end)
+    end
+end)
+
+-- // DROPDOWN LAYER ------------------------------------------------------
+local DropdownLayer = New("Frame", {
+    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+    BorderSizePixel = 0, ZIndex = 100,
+}, Window)
+
+local CurrentDropdown = nil
+
+CloseAllDropdowns = function()
+    if CurrentDropdown then
+        pcall(function() CurrentDropdown:Destroy() end)
+        CurrentDropdown = nil
+    end
+end
+
+-- // FLOATING TOGGLE ORB --------------------------------------------------
+local FloatBtn = New("TextButton", {
+    Position = UDim2.fromOffset(vp0.X - 80, vp0.Y - 98),
+    Size = UDim2.fromOffset(52, 52), BackgroundColor3 = Color3.fromRGB(13, 14, 22),
+    BackgroundTransparency = 0.08, AutoButtonColor = false,
+    Text = "", BorderSizePixel = 0,
+}, FloatGui)
+New("UICorner", {CornerRadius = UDim.new(1, 0)}, FloatBtn)
+local FloatStroke = New("UIStroke", {
+    Color = ThemeState.Accent, Transparency = 0.25, Thickness = 2,
+}, FloatBtn)
+MarkTheme(FloatStroke, "stroke")
+local FloatGlyph = New("TextLabel", {
+    BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), ZIndex = 2,
+    Font = Enum.Font.GothamBlack, Text = "A", TextSize = 21,
+    TextColor3 = ThemeState.Accent,
+}, FloatBtn)
+MarkTheme(FloatGlyph, "text")
+New("UIGradient", {
+    Rotation = 115,
+    Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.75),
+        NumberSequenceKeypoint.new(0.45, 1),
+        NumberSequenceKeypoint.new(1, 0.85),
+    }),
+}, FloatBtn)
+
+local FloatPulseTween = nil
+local function FloatPulseOn()
+    pcall(function()
+        if FloatPulseTween then FloatPulseTween:Cancel() end
+        FloatPulseTween = Tween(FloatStroke, {Transparency = 0.6},
+            TweenInfo.new(1.1, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, true))
+    end)
+end
+local function FloatPulseOff()
+    pcall(function()
+        if FloatPulseTween then FloatPulseTween:Cancel(); FloatPulseTween = nil end
+        FloatStroke.Transparency = 0.2
+    end)
+end
+FloatPulseOn()
+
+-- // UNIVERSAL DRAG (PC mouse + mobile touch) -----------------------------
+local function MakeDraggable(handle, target, opts)
+    opts = opts or {}
+    local dragging, moved = false, false
+    local startInput, startPos
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            moved = false
+            startInput = Vector2.new(input.Position.X, input.Position.Y)
+            startPos = Vector2.new(target.Position.X.Offset, target.Position.Y.Offset)
+            if CloseAllDropdowns then pcall(CloseAllDropdowns) end
+        end
+    end)
+    TrackConnection(UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            local dx = input.Position.X - startInput.X
+            local dy = input.Position.Y - startInput.Y
+            if math.abs(dx) + math.abs(dy) > 6 then moved = true end
+            if moved then
+                local nx, ny = startPos.X + dx, startPos.Y + dy
+                if opts.clamp then
+                    local cam = GetCam()
+                    if cam then
+                        local vps = cam.ViewportSize
+                        local sz = target.AbsoluteSize
+                        nx = math.clamp(nx, 8, math.max(8, vps.X - sz.X - 8))
+                        ny = math.clamp(ny, 8, math.max(8, vps.Y - sz.Y - 8))
+                    end
+                end
+                target.Position = UDim2.fromOffset(nx, ny)
+            end
+        end
+    end))
+    TrackConnection(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then
+                dragging = false
+                if opts.onRelease then pcall(opts.onRelease, moved) end
+            end
+        end
+    end))
+end
+
+MakeDraggable(TitleBar, Window, {clamp = true})
+MakeDraggable(FloatBtn, FloatBtn, {
+    clamp = true,
+    onRelease = function(moved)
+        if not moved then pcall(ToggleMenu) end
+    end,
+})
+
+-- // VIEWPORT RESIZE SAFETY (v3.1: rotation / resolution changes) --------
+-- Mobile rotation or a resized window can leave the orb / menu stranded
+-- off-screen; re-clamp both back into view whenever the viewport changes.
+pcall(function()
+    local cam = GetCam()
+    if cam then
+        TrackConnection(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+            pcall(function()
+                local vps = cam.ViewportSize
+                local fs = FloatBtn.AbsoluteSize
+                FloatBtn.Position = UDim2.fromOffset(
+                    math.clamp(FloatBtn.Position.X.Offset, 8, math.max(8, vps.X - fs.X - 8)),
+                    math.clamp(FloatBtn.Position.Y.Offset, 8, math.max(8, vps.Y - fs.Y - 8))
+                )
+                local ws = Window.AbsoluteSize
+                Window.Position = UDim2.fromOffset(
+                    math.clamp(Window.Position.X.Offset, 4, math.max(4, vps.X - ws.X - 4)),
+                    math.clamp(Window.Position.Y.Offset, 4, math.max(4, vps.Y - ws.Y - 4))
+                )
+            end)
+        end))
+    end
+end)
+
+-- // TOASTS ---------------------------------------------------------------
+local ToastLayer = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 12),
+    Size = UDim2.fromOffset(480, 0), BackgroundTransparency = 1,
+    AutomaticSize = Enum.AutomaticSize.Y, BorderSizePixel = 0,
+}, ToastGui)
+New("UIListLayout", {
+    Padding = UDim.new(0, 6), HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    SortOrder = Enum.SortOrder.LayoutOrder,
+}, ToastLayer)
+
+Notify = function(text, kind)
+    pcall(function()
+        local color = ThemeState.Accent
+        if kind == "success" then color = Color3.fromRGB(90, 225, 160)
+        elseif kind == "warn" then color = Color3.fromRGB(255, 200, 90)
+        elseif kind == "error" then color = Color3.fromRGB(255, 105, 105) end
+
+        -- keep at most 4 toasts
+        local count = 0
+        for _, c in ipairs(ToastLayer:GetChildren()) do
+            if c:IsA("Frame") then count = count + 1 end
+        end
+        if count >= 4 then
+            for _, c in ipairs(ToastLayer:GetChildren()) do
+                if c:IsA("Frame") then pcall(function() c:Destroy() end) break end
+            end
+        end
+
+        local pill = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 30),
+            BackgroundColor3 = Color3.fromRGB(16, 17, 26), BackgroundTransparency = 0.08,
+            BorderSizePixel = 0,
+        }, ToastLayer, false)
+        New("UICorner", {CornerRadius = UDim.new(1, 0)}, pill)
+        local pst = New("UIStroke", {Color = color, Transparency = 0.55, Thickness = 1}, pill)
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
+        }, pill)
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 13), PaddingRight = UDim.new(0, 15),
+        }, pill)
+        local dot = New("Frame", {
+            Size = UDim2.fromOffset(6, 6), BackgroundColor3 = color, BorderSizePixel = 0,
+        }, pill, false)
+        New("UICorner", {CornerRadius = UDim.new(1, 0)}, dot)
+        local lbl = New("TextLabel", {
+            BackgroundTransparency = 1, Size = UDim2.fromOffset(0, 16),
+            AutomaticSize = Enum.AutomaticSize.X, Font = Enum.Font.GothamMedium,
+            Text = tostring(text), TextSize = 12, TextColor3 = COL.TEXT,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, pill, false)
+
+        local scale = New("UIScale", {Scale = 0.85}, pill, false)
+        Tween(scale, {Scale = 1}, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out))
+        task.delay(2.4, function()
+            pcall(function()
+                Tween(lbl, {TextTransparency = 1})
+                Tween(pst, {Transparency = 1})
+                Tween(pill, {BackgroundTransparency = 1})
+            end)
+        end)
+        task.delay(2.75, function()
+            pcall(function() pill:Destroy() end)
+        end)
+    end)
+end
+
+-- =====================================================================
+-- CONTROL BUILDERS (used by page wiring in part 4)
+-- =====================================================================
+
+local function AttachSliderDrag(pad, onMove)
+    local dragging = false
+    pad.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            if CloseAllDropdowns then pcall(CloseAllDropdowns) end
+            onMove(input)
+        end
+    end)
+    TrackConnection(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+            onMove(input)
+        end
+    end))
+    TrackConnection(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end))
+end
+
+local function AddSection(page, title)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -6, 0, 24), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = #page:GetChildren(),
+    }, page)
+    local txt = New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(2, 0),
+        Size = UDim2.new(1, -10, 0, 16), Font = Enum.Font.GothamBold,
+        Text = string.upper(tostring(title)), TextSize = 10,
+        TextColor3 = ThemeState.Accent, TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    MarkTheme(txt, "text")
+    New("Frame", {
+        Position = UDim2.fromOffset(2, 19), Size = UDim2.new(1, -10, 0, 1),
+        BackgroundColor3 = COL.LINE, BackgroundTransparency = 0.92,
+        BorderSizePixel = 0,
+    }, row)
+    return row
+end
+
+local function AddToggle(page, name, default, callback, syncKey)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -6, 0, 30), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = #page:GetChildren(),
+    }, page)
+    local btn = New("TextButton", {
+        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+        AutoButtonColor = false, Text = "",
+    }, row)
+    New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(2, 0),
+        Size = UDim2.new(1, -60, 1, 0), Font = Enum.Font.GothamMedium,
+        Text = tostring(name), TextSize = 12, TextColor3 = COL.TEXT,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, row)
+    local switch = New("Frame", {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -4, 0.5, 0),
+        Size = UDim2.fromOffset(34, 18), BackgroundColor3 = Color3.fromRGB(22, 24, 34),
+        BackgroundTransparency = 0.25, BorderSizePixel = 0,
+    }, row)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, switch)
+    local switchStroke = New("UIStroke", {Color = COL.LINE, Transparency = 0.9, Thickness = 1}, switch)
+    local swGrad = New("UIGradient", {
+        Color = ColorSequence.new(ThemeState.Accent, ThemeState.Soft),
+    }, switch)
+    MarkTheme(swGrad, "grad")
+    local knob = New("Frame", {
+        Position = UDim2.fromOffset(3, 3), Size = UDim2.fromOffset(12, 12),
+        BackgroundColor3 = Color3.fromRGB(150, 155, 175), BorderSizePixel = 0,
+        ZIndex = 3,
+    }, switch)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, knob)
+
+    -- FIXED ANIMATION: fluid Back-eased knob travel (with a subtle
+    -- size pop) + accent glow ring on the switch border. The label is
+    -- truncated at (width - 60px) while the switch only occupies the
+    -- last 38px, so text can never overlap or clip the control.
+    local KNOB_TI = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    local SW_TI   = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+    local state = default and true or false
+    local function SetVisual(on)
+        Tween(switch, {BackgroundColor3 = on and Color3.new(1, 1, 1) or Color3.fromRGB(22, 24, 34)}, SW_TI)
+        Tween(knob, {
+            Position = UDim2.fromOffset(on and 17 or 3, on and 2 or 3),
+            Size = UDim2.fromOffset(on and 14 or 12, on and 14 or 12),
+            BackgroundColor3 = on and Color3.new(1, 1, 1) or Color3.fromRGB(150, 155, 175),
+        }, KNOB_TI)
+        pcall(function()
+            switchStroke.Color = on and ThemeState.Accent or COL.LINE
+            switchStroke.Transparency = on and 0.3 or 0.9
+        end)
+    end
+    btn.Activated:Connect(function()
+        state = not state
+        SetVisual(state)
+        pcall(callback, state)
+    end)
+    SetVisual(state)
+    SwitchStrokes[#SwitchStrokes + 1] = {
+        stroke = switchStroke,
+        get = function() return state end,
+    }
+    if syncKey then ToggleSetters[syncKey] = SetVisual end
+    return row, SetVisual
+end
+
+local function AddSlider(page, name, minv, maxv, default, decimals, callback)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -6, 0, 44), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = #page:GetChildren(),
+    }, page)
+    New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(2, 0),
+        Size = UDim2.new(1, -74, 0, 16), Font = Enum.Font.GothamMedium,
+        Text = tostring(name), TextSize = 12, TextColor3 = COL.TEXT,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, row)
+    local valLabel = New("TextLabel", {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -2, 0, 0),
+        Size = UDim2.fromOffset(68, 16), BackgroundTransparency = 1,
+        Font = Enum.Font.Code, Text = string.format("%." .. tostring(decimals) .. "f", default),
+        TextSize = 11, TextColor3 = ThemeState.Accent,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, row)
+    MarkTheme(valLabel, "text")
+
+    local pad = New("Frame", {
+        Position = UDim2.fromOffset(0, 20), Size = UDim2.new(1, 0, 0, 22),
+        BackgroundTransparency = 1, Active = true, BorderSizePixel = 0,
+    }, row)
+    local track = New("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.new(1, 0, 0, 4), BackgroundColor3 = Color3.fromRGB(26, 28, 42),
+        BackgroundTransparency = 0.2, BorderSizePixel = 0,
+    }, pad)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, track)
+    local fill = New("Frame", {
+        Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = Color3.new(1, 1, 1),
+        BackgroundTransparency = 0.1, BorderSizePixel = 0,
+    }, track)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, fill)
+    local fGrad = New("UIGradient", {Color = ColorSequence.new(ThemeState.Accent, ThemeState.Soft)}, fill)
+    MarkTheme(fGrad, "grad")
+    local knob = New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.fromOffset(11, 11), BackgroundColor3 = Color3.fromRGB(240, 242, 250),
+        BorderSizePixel = 0, ZIndex = 2,
+    }, track)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, knob)
+    local kStroke = New("UIStroke", {Color = ThemeState.Accent, Transparency = 0.3, Thickness = 1.5}, knob)
+    MarkTheme(kStroke, "stroke")
+
+    local function SetValue(v, fire)
+        v = math.clamp(v, minv, maxv)
+        local alpha = (v - minv) / math.max(maxv - minv, 1e-9)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+        valLabel.Text = string.format("%." .. tostring(decimals) .. "f", v)
+        if fire and callback then pcall(callback, v) end
+    end
+
+    AttachSliderDrag(pad, function(input)
+        local a = math.clamp(
+            (input.Position.X - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1),
+            0, 1
+        )
+        SetValue(minv + (maxv - minv) * a, true)
+    end)
+    SetValue(default, false)
+    return row
+end
+
+local function AddDropdown(page, name, options, defaultIndex, callback)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -6, 0, 32), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = #page:GetChildren(),
+    }, page)
+    New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(2, 0),
+        Size = UDim2.new(1, -130, 1, 0), Font = Enum.Font.GothamMedium,
+        Text = tostring(name), TextSize = 12, TextColor3 = COL.TEXT,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, row)
+    local ddBtn = New("TextButton", {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -2, 0.5, 0),
+        Size = UDim2.fromOffset(122, 26), BackgroundColor3 = Color3.fromRGB(18, 20, 31),
+        BackgroundTransparency = 0.2, AutoButtonColor = false, Text = "",
+        BorderSizePixel = 0,
+    }, row)
+    New("UICorner", {CornerRadius = UDim.new(0, 8)}, ddBtn)
+    New("UIStroke", {Color = COL.LINE, Transparency = 0.9, Thickness = 1}, ddBtn)
+    local ddLabel = New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 0),
+        Size = UDim2.new(1, -30, 1, 0), Font = Enum.Font.GothamMedium,
+        Text = tostring(options[defaultIndex] or ""), TextSize = 11,
+        TextColor3 = COL.TEXT, TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, ddBtn)
+    local chev = New("Frame", {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0),
+        Size = UDim2.fromOffset(6, 6), BackgroundColor3 = COL.SUB,
+        Rotation = 45, BorderSizePixel = 0,
+    }, ddBtn)
+    New("UICorner", {CornerRadius = UDim.new(0, 2)}, chev)
+
+    local function Open()
+        CloseAllDropdowns()
+        local s = WindowScale.Scale
+        local px = (ddBtn.AbsolutePosition.X - Window.AbsolutePosition.X) / s
+        local py = (ddBtn.AbsolutePosition.Y + ddBtn.AbsoluteSize.Y - Window.AbsolutePosition.Y) / s + 4
+        local list = New("Frame", {
+            Position = UDim2.fromOffset(px, py),
+            Size = UDim2.fromOffset(ddBtn.AbsoluteSize.X / s, math.min(#options, 6) * 26 + 8),
+            BackgroundColor3 = Color3.fromRGB(14, 15, 24), BackgroundTransparency = 0.04,
+            BorderSizePixel = 0, ZIndex = 120,
+        }, DropdownLayer)
+        New("UICorner", {CornerRadius = UDim.new(0, 10)}, list)
+        New("UIStroke", {Color = ThemeState.Accent, Transparency = 0.5, Thickness = 1}, list)
+        New("UIListLayout", {Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder}, list)
+        New("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4)}, list)
+        for i = 1, #options do
+            local optName = options[i]
+            local ob = New("TextButton", {
+                Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = Color3.fromRGB(22, 24, 36),
+                BackgroundTransparency = 0.4, AutoButtonColor = false, Text = "",
+                BorderSizePixel = 0, ZIndex = 121,
+            }, list)
+            New("UICorner", {CornerRadius = UDim.new(0, 7)}, ob)
+            New("TextLabel", {
+                BackgroundTransparency = 1, Position = UDim2.fromOffset(9, 0),
+                Size = UDim2.new(1, -16, 1, 0), Font = Enum.Font.GothamMedium,
+                Text = tostring(optName), TextSize = 11, TextColor3 = COL.TEXT,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 122,
+            }, ob)
+            ob.MouseEnter:Connect(function() Tween(ob, {BackgroundTransparency = 0.05}, 0.1) end)
+            ob.MouseLeave:Connect(function() Tween(ob, {BackgroundTransparency = 0.4}, 0.1) end)
+            ob.Activated:Connect(function()
+                ddLabel.Text = tostring(optName)
+                CloseAllDropdowns()
+                if callback then pcall(callback, optName) end
+            end)
+        end
+        CurrentDropdown = list
+    end
+
+    ddBtn.Activated:Connect(function()
+        if CurrentDropdown then CloseAllDropdowns() else Open() end
+    end)
+
+    return row, function(idx)
+        if options[idx] then ddLabel.Text = tostring(options[idx]) end
+    end
+end
+
+local function AddButton(page, text, callback, danger)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -6, 0, 34), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = #page:GetChildren(),
+    }, page)
+    local btn = New("TextButton", {
+        Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = danger and Color3.fromRGB(44, 18, 24) or Color3.fromRGB(18, 20, 31),
+        BackgroundTransparency = 0.25, AutoButtonColor = false,
+        Text = tostring(text), Font = Enum.Font.GothamBold, TextSize = 12,
+        TextColor3 = danger and COL.DANGER or COL.TEXT, BorderSizePixel = 0,
+    }, row)
+    New("UICorner", {CornerRadius = UDim.new(0, 9)}, btn)
+    local bst = New("UIStroke", {
+        Color = danger and COL.DANGER or ThemeState.Accent,
+        Transparency = danger and 0.55 or 0.6, Thickness = 1,
+    }, row)
+    if not danger then MarkTheme(bst, "stroke") end
+    btn.MouseEnter:Connect(function() Tween(btn, {BackgroundTransparency = 0.05}, 0.12) end)
+    btn.MouseLeave:Connect(function() Tween(btn, {BackgroundTransparency = 0.25}, 0.12) end)
+    btn.Activated:Connect(function()
+        pcall(function() if callback then callback() end end)
+    end)
+    return row
+end
+
+-- // MENU STATE MACHINE (rebuilt: fluid fades, spam-proof) ----------------
+local FloatSpinTarget = 0
+local StateToken      = 0 -- invalidates stale close/minimize timers
+
+local function FadeWindow(target, ti)
+    -- target 0 = fully visible, 1 = fully faded
+    pcall(function()
+        if WindowCanvasOK then
+            Tween(Window, {GroupTransparency = target}, ti)
+        else
+            Tween(Window, {BackgroundTransparency = 0.06 + target * 0.6}, ti)
+            Tween(WindowStroke, {Transparency = 0.45 + target * 0.5}, ti)
+        end
+    end)
+end
+
+local function FadeBody(target, ti)
+    pcall(function()
+        if WindowCanvasOK then
+            Tween(Body, {GroupTransparency = target}, ti)
+        end
+    end)
+end
+
+SetMenu = function(state)
+    if state == MenuState then return end
+    StateToken = StateToken + 1
+    local token = StateToken
+
+    pcall(function()
+        local wasMin = (MenuState == "minimized")
+        if state == "open" then
+            MainGui.Enabled = true
+            Window.Visible = true
+            if wasMin then
+                -- expand smoothly out of the title-bar pill (no snap)
+                Tween(Window, {Size = UDim2.fromOffset(WINDOW_W, WINDOW_H)},
+                    TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out))
+            else
+                Window.Size = UDim2.fromOffset(WINDOW_W, WINDOW_H)
+                -- start slightly smaller, then spring in
+                WindowScale.Scale = BaseScale * 0.86
+                Tween(WindowScale, {Scale = BaseScale},
+                    TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out))
+            end
+            Body.Visible = true
+            -- start fully faded, then fluid fade-in
+            pcall(function()
+                if WindowCanvasOK then
+                    Window.GroupTransparency = 1
+                    Body.GroupTransparency = 1
+                else
+                    Window.BackgroundTransparency = 0.66
+                    WindowStroke.Transparency = 0.95
+                end
+            end)
+            if wasMin then
+                FadeWindow(0, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+                FadeBody(0, TweenInfo.new(0.24, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+            else
+                FadeWindow(0, TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+                FadeBody(0, TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+            end
+            FloatPulseOff()
+        elseif state == "minimized" then
+            CloseAllDropdowns()
+            FadeBody(1, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In))
+            Tween(Window, {Size = UDim2.fromOffset(WINDOW_W, 46)},
+                TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In))
+            task.delay(0.18, function()
+                if StateToken == token and MenuState == "minimized" then
+                    Body.Visible = false
+                    pcall(function() if WindowCanvasOK then Body.GroupTransparency = 0 end end)
+                end
+            end)
+            FloatPulseOn()
+        elseif state == "closed" then
+            CloseAllDropdowns()
+            Tween(WindowScale, {Scale = BaseScale * 0.88},
+                TweenInfo.new(0.17, Enum.EasingStyle.Quad, Enum.EasingDirection.In))
+            FadeWindow(1, TweenInfo.new(0.17, Enum.EasingStyle.Quad, Enum.EasingDirection.In))
+            task.delay(0.19, function()
+                if StateToken == token and MenuState == "closed" then
+                    Window.Visible = false
+                    -- pre-reset for a clean next open
+                    WindowScale.Scale = BaseScale
+                    pcall(function()
+                        if WindowCanvasOK then
+                            Window.GroupTransparency = 0
+                            Body.GroupTransparency = 0
+                        else
+                            Window.BackgroundTransparency = 0.06
+                            WindowStroke.Transparency = 0.45
+                        end
+                    end)
+                end
+            end)
+            FloatPulseOn()
+        end
+        MenuState = state
+        MinBtn.Text = (state == "minimized") and "+" or "–"
+        FloatSpinTarget = (FloatSpinTarget + 90) % 360
+        Tween(FloatBtn, {Rotation = FloatSpinTarget}, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+    end)
+end
+
+ToggleMenu = function()
+    if MenuState == "closed" or MenuState == "minimized" then
+        SetMenu("open")
+    else
+        SetMenu("closed")
+    end
+end
+
+MinimizeMenu = function()
+    if MenuState == "open" then
+        SetMenu("minimized")
+    elseif MenuState == "minimized" then
+        SetMenu("open")
+    end
+end
+
+CloseBtn.Activated:Connect(function() SetMenu("closed") end)
+MinBtn.Activated:Connect(function() MinimizeMenu() end)
+
+-- RightShift toggle (PC)
+TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        pcall(ToggleMenu)
+    end
+end))
+
+-- =====================================================================
+-- INTRO / ACTIVATION ANIMATION (v3.1)
+-- Branded glass splash that springs in on load (Back easing +
+-- CanvasGroup fade), plays a progress hairline + halo ripple, then
+-- hands off to the menu's spring entrance. Pcall-guarded end to end,
+-- self-cleaning, and safe on executors without CanvasGroup (falls
+-- back to a plain frame fade).
+-- =====================================================================
+local IntroGui = New("ScreenGui", {
+    Name = "AuraXHub_Intro", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 500, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+ParentGui(IntroGui)
+
+local function PlayIntro(onDone)
+    task.spawn(function()
+        pcall(function()
+            local card = New(WindowCanvasOK and "CanvasGroup" or "Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.fromScale(0.5, 0.47),
+                Size = UDim2.fromOffset(324, 112),
+                BackgroundColor3 = COL.BG, BackgroundTransparency = 0.04,
+                BorderSizePixel = 0, Active = false,
+            }, IntroGui)
+            if not card then return end
+
+            New("UICorner", {CornerRadius = UDim.new(0, 16)}, card)
+            local cStroke = New("UIStroke", {
+                Color = ThemeState.Accent, Transparency = 0.4, Thickness = 1.4,
+            }, card)
+            MarkTheme(cStroke, "stroke")
+
+            -- top glass sheen
+            local sheen = New("Frame", {
+                Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = Color3.new(1, 1, 1),
+                BackgroundTransparency = 1, BorderSizePixel = 0,
+            }, card)
+            New("UICorner", {CornerRadius = UDim.new(0, 16)}, sheen)
+            New("UIGradient", {
+                Rotation = 90,
+                Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 0.94),
+                    NumberSequenceKeypoint.new(1, 1),
+                }),
+            }, sheen)
+
+            -- expanding halo ripple + accent logo dot
+            local halo = New("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(40, 40),
+                Size = UDim2.fromOffset(26, 26), BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+            }, card)
+            New("UICorner", {CornerRadius = UDim.new(1, 0)}, halo)
+            local haloStroke = New("UIStroke", {
+                Color = ThemeState.Accent, Transparency = 0.3, Thickness = 2,
+            }, halo)
+            MarkTheme(haloStroke, "stroke")
+
+            local logoDot = New("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(40, 40),
+                Size = UDim2.fromOffset(14, 14), BackgroundColor3 = ThemeState.Accent,
+                BorderSizePixel = 0,
+            }, card)
+            New("UICorner", {CornerRadius = UDim.new(1, 0)}, logoDot)
+            MarkTheme(logoDot, "fill")
+
+            New("TextLabel", {
+                Position = UDim2.fromOffset(66, 24), Size = UDim2.fromOffset(230, 26),
+                BackgroundTransparency = 1, Font = Enum.Font.GothamBlack,
+                Text = "AURAX HUB", TextSize = 22, TextColor3 = COL.TEXT,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, card)
+
+            local badge = New("Frame", {
+                Position = UDim2.fromOffset(66, 54), Size = UDim2.fromOffset(128, 16),
+                BackgroundTransparency = 1, BorderSizePixel = 0,
+            }, card)
+            New("UICorner", {CornerRadius = UDim.new(1, 0)}, badge)
+            local bStroke = New("UIStroke", {
+                Color = ThemeState.Accent, Transparency = 0.45, Thickness = 1,
+            }, badge)
+            MarkTheme(bStroke, "stroke")
+            local bText = New("TextLabel", {
+                BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0),
+                Font = Enum.Font.GothamBold, Text = "ULTIMATE PRO · v" .. VERSION,
+                TextSize = 8, TextColor3 = ThemeState.Accent,
+            }, badge)
+            MarkTheme(bText, "text")
+
+            New("TextLabel", {
+                Position = UDim2.fromOffset(16, 76), Size = UDim2.new(1, -32, 0, 12),
+                BackgroundTransparency = 1, Font = Enum.Font.Code,
+                Text = "activating visual suite...", TextSize = 10,
+                TextColor3 = COL.SUB, TextXAlignment = Enum.TextXAlignment.Left,
+            }, card)
+
+            local track = New("Frame", {
+                AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 16, 1, -12),
+                Size = UDim2.new(1, -32, 0, 3), BackgroundColor3 = Color3.fromRGB(30, 32, 46),
+                BackgroundTransparency = 0.2, BorderSizePixel = 0,
+            }, card)
+            New("UICorner", {CornerRadius = UDim.new(1, 0)}, track)
+            local fillBar = New("Frame", {
+                Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = Color3.new(1, 1, 1),
+                BorderSizePixel = 0,
+            }, track)
+            New("UICorner", {CornerRadius = UDim.new(1, 0)}, fillBar)
+            local fbGrad = New("UIGradient", {
+                Color = ColorSequence.new(ThemeState.Accent, ThemeState.Soft),
+            }, fillBar)
+            MarkTheme(fbGrad, "grad")
+
+            -- start hidden + small, then SPRING in
+            local cardScale = New("UIScale", {Scale = 0.7}, card)
+            if WindowCanvasOK then card.GroupTransparency = 1 else card.BackgroundTransparency = 1 end
+
+            Tween(cardScale, {Scale = 1},
+                TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out))
+            if WindowCanvasOK then
+                Tween(card, {GroupTransparency = 0},
+                    TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+            else
+                Tween(card, {BackgroundTransparency = 0.04},
+                    TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+            end
+            Tween(fillBar, {Size = UDim2.new(1, 0, 1, 0)},
+                TweenInfo.new(0.95, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+            -- halo ripple expands + dissolves
+            Tween(halo, {Size = UDim2.fromOffset(66, 66)},
+                TweenInfo.new(0.95, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+            Tween(haloStroke, {Transparency = 1, Thickness = 6},
+                TweenInfo.new(0.95, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+
+            task.wait(1.12)
+
+            -- fade out + slight grow, then clean up
+            if card.Parent then
+                if WindowCanvasOK then
+                    Tween(card, {GroupTransparency = 1},
+                        TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.In))
+                else
+                    Tween(card, {BackgroundTransparency = 1},
+                        TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.In))
+                end
+                Tween(cardScale, {Scale = 1.06},
+                    TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.In))
+            end
+            task.wait(0.28)
+            pcall(function() card:Destroy() end)
+        end)
+        -- hand off to the menu (skips silently if unloaded mid-intro)
+        if IntroGui.Parent and onDone then pcall(onDone) end
+    end)
+end
+
+SelectTab(1)
+
+-- =====================================================================
+-- PART 3 · EFFECT MODULES
+-- =====================================================================
+
+-- // SHARED FX HELPERS ---------------------------------------------------
+
+-- Builds an orthonormal CFrame whose X axis (cylinder axis) lies along
+-- `normal` — used to lay rings flat on slopes. (Fixed raycast alignment.)
+local function GroundBasis(pos, normal)
+    local x = normal
+    if x.Magnitude < 0.05 then x = Vector3.new(0, 1, 0) end
+    x = x.Unit
+    local ref = (math.abs(x.Y) > 0.92) and Vector3.new(1, 0, 0) or Vector3.new(0, 1, 0)
+    local y = (ref - x * ref:Dot(x))
+    if y.Magnitude < 0.01 then y = Vector3.new(0, 0, 1) end
+    y = y.Unit
+    local z = x:Cross(y)
+    return CFrame.fromMatrix(pos, x, y, z)
+end
+
+-- shared exclusion-list builder (never passes nil holes to Roblox)
+local function MakeRayParams()
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local excl = {}
+    if Char.character then excl[#excl + 1] = Char.character end
+    if FXFolder then excl[#excl + 1] = FXFolder end
+    params.FilterDescendantsInstances = excl
+    return params
+end
+
+-- dist: how far down to probe; solidOnly: ignore CanCollide=false parts
+local function GroundRaycast(origin, dist, solidOnly)
+    local params = MakeRayParams()
+    pcall(function() params.RespectCanCollide = solidOnly and true or false end)
+    return Workspace:Raycast(origin, Vector3.new(0, -dist, 0), params)
+end
+
+local function SpawnSparkBurst(pos, count)
+    pcall(function()
+        local holder = New("Part", {
+            Size = Vector3.new(0.3, 0.3, 0.3), Transparency = 1,
+            CFrame = CFrame.new(pos + Vector3.new(0, 0.25, 0)),
+            Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false,
+        }, FXFolder, false)
+        local em = New("ParticleEmitter", {
+            Color = ColorSequence.new(ThemeState.Accent),
+            LightEmission = 1, LightInfluence = 0, Brightness = 1.6,
+            Size = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.17),
+                NumberSequenceKeypoint.new(1, 0),
+            }),
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.05),
+                NumberSequenceKeypoint.new(1, 1),
+            }),
+            Lifetime = NumberRange.new(0.3, 0.65),
+            Speed = NumberRange.new(3, 8),
+            SpreadAngle = Vector2.new(45, 45),
+            Acceleration = Vector3.new(0, -30, 0),
+            Rate = 0,
+        }, holder, false)
+        em:Emit(math.max(1, count))
+        task.delay(1.1, function() pcall(function() holder:Destroy() end) end)
+    end)
+end
+
+-- =====================================================================
+-- SELF CHAMS · translucent glass body + rainbow aura
+-- =====================================================================
+local ChamsHL   = nil
+local GlassParts = {}
+
+local ChamColorMap = {
+    White   = Color3.fromRGB(240, 240, 255),
+    Crimson = Color3.fromRGB(255, 80, 95),
+    Gold    = Color3.fromRGB(255, 200, 80),
+    Ice     = Color3.fromRGB(140, 220, 255),
+}
+
+RestoreGlass = function()
+    for part, data in pairs(GlassParts) do
+        pcall(function()
+            if part and part.Parent then
+                part.Material = data.m
+                part.Transparency = data.t
+                part.Reflectance = data.r
+            end
+        end)
+    end
+    GlassParts = {}
+end
+
+-- REWORKED: real translucent colored-glass body (Glass material with
+-- a gentle sheen) under a see-through colored Highlight, not a solid
+-- overlay. Pairs with the smooth rainbow cycle below.
+local function ApplyGlass(ch)
+    pcall(function()
+        for _, d in ipairs(ch:GetDescendants()) do
+            if d:IsA("BasePart") and d.Transparency < 0.85 then
+                GlassParts[d] = {m = d.Material, t = d.Transparency, r = d.Reflectance}
+                d.Material = Enum.Material.Glass
+                pcall(function() d.Reflectance = 0.05 end)
+                d.Transparency = math.clamp(d.Transparency + 0.16, 0, 0.5)
+            end
+        end
+    end)
+end
+
+SetChams = function(on)
+    Settings.Chams = on
+    pcall(function()
+        if ChamsHL then ChamsHL:Destroy(); ChamsHL = nil end
+        RestoreGlass()
+        if on then
+            local ch = Char.character
+            if ch then
+                ChamsHL = New("Highlight", {
+                    FillColor = ThemeState.Accent,
+                    OutlineColor = ThemeState.Accent:Lerp(Color3.new(1, 1, 1), 0.35),
+                    FillTransparency = 0.62,
+                    OutlineTransparency = 0.12,
+                    DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+                }, ch)
+                if Settings.ChamGlass then ApplyGlass(ch) end
+            end
+        end
+    end)
+end
+
+SetChamsGlass = function(v)
+    Settings.ChamGlass = v
+    pcall(function()
+        local ch = Char.character
+        RestoreGlass()
+        if v and Settings.Chams and ch then ApplyGlass(ch) end
+    end)
+end
+
+AddUpdater(function(dt, t)
+    if not Settings.Chams then return end
+    local hl = ChamsHL
+    if not (hl and hl.Parent) then return end
+    if Settings.ChamRainbow then
+        local hue = (t * 0.28) % 1
+        hl.FillColor = Color3.fromHSV(hue, 0.75, 1)
+        hl.OutlineColor = Color3.fromHSV((hue + 0.08) % 1, 0.6, 1)
+    elseif Settings.ChamColor == "Theme" then
+        hl.FillColor = ThemeState.Accent
+        hl.OutlineColor = ThemeState.Accent:Lerp(Color3.new(1, 1, 1), 0.35)
+    else
+        local c = ChamColorMap[Settings.ChamColor] or ThemeState.Accent
+        hl.FillColor = c
+        hl.OutlineColor = c:Lerp(Color3.new(1, 1, 1), 0.35)
+    end
+end)
+
+AddCharHook(function()
+    if Settings.Chams then
+        task.delay(0.5, function() pcall(function() SetChams(true) end) end)
+    end
+end)
+
+-- =====================================================================
+-- TRADITIONAL CHINA HAT · wide brim + 12-facet conical crown
+-- (procedural, anchored, zero Motor6D involvement — no rig errors)
+-- =====================================================================
+local HatModel = nil
+local HatGlow, HatFinial = nil, nil
+local HatSpinAngle = 0
+local HAT_SEGMENTS = 12
+local HAT_R = 1.5   -- crown radius
+local HAT_H = 1.35  -- crown height
+
+local function BuildHat()
+    pcall(function()
+        if HatModel then HatModel:Destroy(); HatModel = nil end
+        HatModel = New("Model", {Name = "AuraX_Hat"}, FXFolder)
+        if not HatModel then return end
+
+        local base = New("Part", {
+            Size = Vector3.new(0.2, 0.2, 0.2), Transparency = 1,
+            CFrame = CFrame.new(0, 0, 0), Anchored = true, CanCollide = false,
+            CanQuery = false, CastShadow = false,
+        }, HatModel, false)
+        pcall(function() HatModel.PrimaryPart = base end)
+
+        -- wide flat brim
+        New("Part", {
+            Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.1, 5.1, 5.1),
+            CFrame = CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.rad(90)),
+            Material = Enum.Material.SmoothPlastic, Color = Color3.fromRGB(20, 20, 28),
+            Transparency = 0.05, Anchored = true, CanCollide = false,
+            CanQuery = false, CanTouch = false, CastShadow = false,
+        }, HatModel, false)
+
+        -- neon underglow ring (RGB cycle target)
+        HatGlow = New("Part", {
+            Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.05, 5.34, 5.34),
+            CFrame = CFrame.new(0, -0.03, 0) * CFrame.Angles(0, 0, math.rad(90)),
+            Material = Enum.Material.Neon, Color = ThemeState.Accent,
+            Transparency = 0.3, Anchored = true, CanCollide = false,
+            CanQuery = false, CanTouch = false, CastShadow = false,
+        }, HatModel, false)
+        MarkTheme(HatGlow, "part")
+
+        -- inner cap disc (blocks see-through between crown facets)
+        New("Part", {
+            Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.07, 1.9, 1.9),
+            CFrame = CFrame.new(0, 0.1, 0) * CFrame.Angles(0, 0, math.rad(90)),
+            Material = Enum.Material.SmoothPlastic, Color = Color3.fromRGB(13, 13, 20),
+            Transparency = 0.1, Anchored = true, CanCollide = false,
+            CanQuery = false, CanTouch = false, CastShadow = false,
+        }, HatModel, false)
+
+        -- faceted conical crown: 12 tilted panels meeting at the apex
+        local chord = 2 * HAT_R * math.tan(math.pi / HAT_SEGMENTS) * 1.14
+        local slant = math.sqrt(HAT_R * HAT_R + HAT_H * HAT_H)
+        local tilt  = math.atan2(HAT_H, HAT_R)
+        for i = 1, HAT_SEGMENTS do
+            local phi = (i / HAT_SEGMENTS) * math.pi * 2
+            local shade = (i % 2 == 0) and Color3.fromRGB(23, 24, 35) or Color3.fromRGB(16, 16, 26)
+            New("Part", {
+                Size = Vector3.new(chord, 0.07, slant),
+                CFrame = CFrame.new(0, HAT_H / 2, 0)
+                    * CFrame.Angles(0, phi, 0)
+                    * CFrame.new(0, 0, HAT_R / 2)
+                    * CFrame.Angles(tilt, 0, 0),
+                Material = Enum.Material.SmoothPlastic, Color = shade,
+                Transparency = 0.06, Anchored = true, CanCollide = false,
+                CanQuery = false, CanTouch = false, CastShadow = false,
+            }, HatModel, false)
+        end
+
+        -- glowing finial
+        HatFinial = New("Part", {
+            Shape = Enum.PartType.Ball, Size = Vector3.new(0.34, 0.34, 0.34),
+            CFrame = CFrame.new(0, HAT_H + 0.12, 0),
+            Material = Enum.Material.Neon, Color = ThemeState.Accent,
+            Anchored = true, CanCollide = false, CanQuery = false,
+            CanTouch = false, CastShadow = false,
+        }, HatModel, false)
+        MarkTheme(HatFinial, "part")
+    end)
+end
+
+SetHat = function(on)
+    Settings.Hat = on
+    if on then
+        BuildHat()
+    else
+        pcall(function() if HatModel then HatModel:Destroy() end end)
+        HatModel = nil
+    end
+end
+
+AddUpdater(function(dt, t)
+    if not Settings.Hat then return end
+    local model = HatModel
+    if not (model and model.Parent) then return end
+    local head = nil
+    local ch = Char.character
+    if ch then head = ch:FindFirstChild("Head") end
+    local root = Char.root
+    if not (head or root) then return end
+    local basePos
+    if head then
+        basePos = Vector3.new(head.Position.X, head.Position.Y + head.Size.Y * 0.5 + 0.12, head.Position.Z)
+    else
+        basePos = root.Position + Vector3.new(0, 1.6, 0)
+    end
+    HatSpinAngle = HatSpinAngle + dt * math.rad(Settings.HatSpin)
+    local cf = CFrame.new(basePos)
+        * CFrame.Angles(0, HatSpinAngle, 0)
+        * CFrame.Angles(math.rad(7), 0, math.rad(3))
+    model:PivotTo(cf)
+    if Settings.HatRGB then
+        local c = Color3.fromHSV((t * 0.35) % 1, 0.8, 1)
+        if HatGlow then HatGlow.Color = c end
+        if HatFinial then HatFinial.Color = c end
+    end
+end)
+
+AddCharHook(function()
+    if Settings.Hat then
+        pcall(function() SetHat(true) end)
+    end
+end)
+
+-- =====================================================================
+-- ELEMENTAL ORBS · orbiting energy spheres with trails
+-- =====================================================================
+local OrbParts = {}
+local OrbPalette = {
+    Color3.fromRGB(255, 140, 70),  -- ember
+    Color3.fromRGB(120, 220, 255), -- frost
+    Color3.fromRGB(126, 255, 148), -- leaf
+    Color3.fromRGB(190, 122, 255), -- void
+    Color3.fromRGB(255, 212, 96),  -- gilded
+    Color3.fromRGB(255, 122, 176), -- rose
+    Color3.fromRGB(160, 255, 244), -- tide
+    Color3.fromRGB(228, 228, 255), -- pure
+}
+
+local function RebuildOrbs()
+    pcall(function()
+        for i = 1, #OrbParts do
+            pcall(function() OrbParts[i]:Destroy() end)
+        end
+        OrbParts = {}
+        if not Settings.Orbs then return end
+        local root = Char.root
+        if not (root and root.Parent) then return end
+        for i = 1, Settings.OrbCount do
+            local col = OrbPalette[((i - 1) % #OrbPalette) + 1]
+            local orb = New("Part", {
+                Shape = Enum.PartType.Ball, Size = Vector3.new(0.62, 0.62, 0.62),
+                Material = Enum.Material.Neon, Color = col,
+                Anchored = true, CanCollide = false, CanQuery = false,
+                CanTouch = false, CastShadow = false, CFrame = root.CFrame,
+                Transparency = 0.06,
+            }, FXFolder, false)
+            New("PointLight", {Color = col, Range = 7, Brightness = 1.1}, orb, false)
+            New("ParticleEmitter", {
+                Color = ColorSequence.new(col), Rate = 5,
+                Size = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 0.18),
+                    NumberSequenceKeypoint.new(1, 0),
+                }),
+                Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 0.3),
+                    NumberSequenceKeypoint.new(1, 1),
+                }),
+                Lifetime = NumberRange.new(0.4, 0.7),
+                Speed = NumberRange.new(0.5, 1.5),
+                LightEmission = 1, LightInfluence = 0,
+            }, orb, false)
+            local a0 = New("Attachment", {Position = Vector3.new(0, 0.26, 0)}, orb, false)
+            local a1 = New("Attachment", {Position = Vector3.new(0, -0.26, 0)}, orb, false)
+            New("Trail", {
+                Attachment0 = a0, Attachment1 = a1, Lifetime = 0.35,
+                Color = ColorSequence.new(col), LightEmission = 1, FaceCamera = true,
+                Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 0.25),
+                    NumberSequenceKeypoint.new(1, 1),
+                }),
+                WidthScale = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 1),
+                    NumberSequenceKeypoint.new(1, 0.15),
+                }),
+            }, orb, false)
+            OrbParts[i] = orb
+        end
+    end)
+end
+
+SetOrbs = function(on)
+    Settings.Orbs = on
+    if on then
+        RebuildOrbs()
+    else
+        for i = 1, #OrbParts do
+            pcall(function() OrbParts[i]:Destroy() end)
+        end
+        OrbParts = {}
+    end
+end
+
+SetOrbCount = function(n)
+    n = math.clamp(math.floor(n), 1, 8)
+    Settings.OrbCount = n
+    if Settings.Orbs then RebuildOrbs() end
+end
+
+AddUpdater(function(dt, t)
+    if not Settings.Orbs then return end
+    local root = Char.root
+    if not (root and root.Parent) then return end
+    local p = root.Position
+    local n = #OrbParts
+    for i = 1, n do
+        local orb = OrbParts[i]
+        if orb and orb.Parent then
+            local a = t * 1.5 + (i / math.max(n, 1)) * math.pi * 2
+            local y = 0.4 + math.sin(t * 1.8 + i * 1.3) * 0.85
+            orb.CFrame = CFrame.new(p + Vector3.new(math.cos(a) * 3.2, y, math.sin(a) * 3.2))
+            local col
+            if Settings.OrbRainbow then
+                col = Color3.fromHSV((t * 0.3 + i / math.max(n, 1)) % 1, 0.75, 1)
+            else
+                col = OrbPalette[((i - 1) % #OrbPalette) + 1]
+            end
+            orb.Color = col
+            local pl = orb:FindFirstChildOfClass("PointLight")
+            if pl then pl.Color = col end
+            local tr = orb:FindFirstChildOfClass("Trail")
+            if tr then tr.Color = ColorSequence.new(col) end
+            local pe = orb:FindFirstChildOfClass("ParticleEmitter")
+            if pe then pe.Color = ColorSequence.new(col) end
+        end
+    end
+end)
+
+AddCharHook(function()
+    if Settings.Orbs then
+        task.delay(0.6, function() pcall(RebuildOrbs) end)
+    end
+end)
+
+-- =====================================================================
+-- FOOTSTEP SPARKS · neon dust on every stride
+-- =====================================================================
+local FootLast, FootAccum = nil, 0
+
+SetFootSparks = function(on)
+    Settings.FootSparks = on
+    local root = Char.root
+    if root then FootLast = root.Position end
+end
+
+AddUpdater(function()
+    if not Settings.FootSparks then return end
+    local root = Char.root
+    local hum = Char.humanoid
+    if not (root and root.Parent) then return end
+    if hum and hum.FloorMaterial == Enum.Material.Air then return end
+    local pos = root.Position
+    if not FootLast then FootLast = pos return end
+    local flat = Vector3.new(pos.X - FootLast.X, 0, pos.Z - FootLast.Z).Magnitude
+    FootLast = pos
+    FootAccum = FootAccum + flat
+    if FootAccum >= 2.7 then
+        FootAccum = 0
+        pcall(function()
+            local hit = GroundRaycast(pos, 8)
+            local gpos = hit and hit.Position or (pos - Vector3.new(0, 2.9, 0))
+            SpawnSparkBurst(gpos, math.floor(5 + 5 * math.clamp(Settings.SparkIntensity, 0.2, 2)))
+        end)
+    end
+end)
+
+-- =====================================================================
+-- JUMP CIRCLE · hollow neon ring on jump (fixed raycast + dual triggers)
+-- =====================================================================
+local CharConns = {}
+local lastJumpTrigger = 0
+
+local function DisconnectCharConns()
+    for i = 1, #CharConns do
+        pcall(function() CharConns[i]:Disconnect() end)
+    end
+    CharConns = {}
+end
+
+-- ---------------------------------------------------------------------
+-- HOLLOW JUMP RING (the fix)
+-- The center is completely EMPTY (true cut-out). Each ring is built
+-- from 24 neon segments arranged in a circle and flattened onto the
+-- surface normal, so it hugs any terrain or slope. Segments expand
+-- outward and fade as one glowing donut border - no solid disc.
+-- ---------------------------------------------------------------------
+local RING_SEGS = 24
+local ActiveRings = {}
+
+local function BuildRing(basis, color, r0, r1, width, thick, dur, delayT)
+    local model = New("Model", {Name = "AuraX_JumpRing"}, FXFolder, false)
+    if not model then return end
+    local segs = {}
+    local arc0 = (2 * math.pi * r0 / RING_SEGS) * 1.4 -- overlap: seamless at spawn
+    for i = 1, RING_SEGS do
+        local theta = (i / RING_SEGS) * math.pi * 2
+        local seg = New("Part", {
+            Size = Vector3.new(thick, arc0, width),
+            CFrame = basis * CFrame.Angles(theta, 0, 0) * CFrame.new(0, 0, -r0),
+            Anchored = true, CanCollide = false, CanQuery = false,
+            CanTouch = false, Material = Enum.Material.Neon,
+            Color = color, Transparency = (delayT > 0) and 1 or 0.12,
+            CastShadow = false,
+        }, model, false)
+        segs[i] = seg
+    end
+    ActiveRings[#ActiveRings + 1] = {
+        model = model, segs = segs, basis = basis,
+        r0 = r0, r1 = r1, width = width, thick = thick,
+        born = os.clock() + delayT, dur = dur,
+    }
+end
+
+local function SpawnJumpRing()
+    pcall(function()
+        local root = Char.root
+        if not (root and root.Parent) then return end
+
+        -- hardened ground probe: collidable geometry first, then accept
+        -- anything (trusses, thin decor) so the ring NEVER fails to spawn
+        local origin = root.Position + Vector3.new(0, 1, 0)
+        local hit = GroundRaycast(origin, 220, true)
+        if not hit then hit = GroundRaycast(origin, 220, false) end
+        local pos, normal
+        if hit then
+            pos = hit.Position
+            normal = hit.Normal
+            if normal.Magnitude < 0.05 then normal = Vector3.new(0, 1, 0) end
+            normal = normal.Unit
+        else
+            pos = origin - Vector3.new(0, root.Size.Y * 0.5 + 2.4, 0)
+            normal = Vector3.new(0, 1, 0)
+        end
+        pos = pos + normal * 0.06
+        local basis = GroundBasis(pos, normal)
+        local accent  = ThemeState.Accent
+        local coreCol = accent:Lerp(Color3.new(1, 1, 1), 0.5)
+
+        -- outer accent ring + inner white-hot ring (double pulse)
+        BuildRing(basis, accent, 1.15, 5.7, 0.3, 0.11, 0.62, 0)
+        BuildRing(basis, coreCol, 0.75, 3.9, 0.2, 0.08, 0.5, 0.07)
+
+        -- soft light bloom at the ring center
+        local anchor = New("Part", {
+            Size = Vector3.new(0.2, 0.2, 0.2), Transparency = 1,
+            CFrame = CFrame.new(pos + normal * 0.35), Anchored = true,
+            CanCollide = false, CanQuery = false, CanTouch = false,
+            CastShadow = false,
+        }, FXFolder, false)
+        local light = New("PointLight", {
+            Color = accent, Range = 13, Brightness = 1.8,
+        }, anchor, false)
+        Tween(light, {Brightness = 0, Range = 18}, TweenInfo.new(0.55))
+        task.delay(0.6, function() pcall(function() anchor:Destroy() end) end)
+
+        -- ground dust puff keeps the jump impact punchy
+        local burst = New("Part", {
+            Size = Vector3.new(0.4, 0.4, 0.4), Transparency = 1,
+            CFrame = CFrame.new(pos + normal * 0.3), Anchored = true,
+            CanCollide = false, CanQuery = false, CanTouch = false,
+        }, FXFolder, false)
+        local em = New("ParticleEmitter", {
+            Color = ColorSequence.new(accent),
+            LightEmission = 1, LightInfluence = 0, Brightness = 1.5,
+            Size = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.22),
+                NumberSequenceKeypoint.new(1, 0),
+            }),
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.1),
+                NumberSequenceKeypoint.new(1, 1),
+            }),
+            Lifetime = NumberRange.new(0.35, 0.6),
+            Speed = NumberRange.new(5, 10),
+            SpreadAngle = Vector2.new(38, 38),
+            Acceleration = Vector3.new(0, -26, 0),
+            Rate = 0,
+        }, burst, false)
+        em:Emit(14)
+        task.delay(1.1, function() pcall(function() burst:Destroy() end) end)
+    end)
+end
+
+-- single animator for every active hollow ring
+AddUpdater(function()
+    if #ActiveRings == 0 then return end
+    local now = os.clock()
+    for i = #ActiveRings, 1, -1 do
+        local ring = ActiveRings[i]
+        local alive = true
+        if not (ring.model and ring.model.Parent) then
+            alive = false
+        else
+            local p = (now - ring.born) / ring.dur
+            if p >= 1 then
+                alive = false
+            elseif p > 0 then
+                local e  = 1 - (1 - p) ^ 4 -- QuartOut: fast pop, soft landing
+                local r  = ring.r0 + (ring.r1 - ring.r0) * e
+                local arc = (2 * math.pi * r / RING_SEGS) * (1.4 - 0.5 * p)
+                local w  = ring.width * (1 - 0.55 * p)
+                local th = ring.thick * (1 - 0.4 * p)
+                local tr = 0.12 + 0.88 * p
+                for s = 1, RING_SEGS do
+                    local seg = ring.segs[s]
+                    if seg and seg.Parent then
+                        seg.Size = Vector3.new(th, arc, w)
+                        seg.CFrame = ring.basis
+                            * CFrame.Angles((s / RING_SEGS) * math.pi * 2, 0, 0)
+                            * CFrame.new(0, 0, -r)
+                        seg.Transparency = tr
+                    end
+                end
+            end
+        end
+        if not alive then
+            pcall(function() ring.model:Destroy() end)
+            table.remove(ActiveRings, i)
+        end
+    end
+end)
+
+local function JumpTrigger()
+    if not Settings.JumpCircle then return end
+    if os.clock() - lastJumpTrigger < 0.4 then return end
+    lastJumpTrigger = os.clock()
+    SpawnJumpRing()
+end
+
+-- trigger 1: humanoid jump state (re-hooked on every respawn)
+AddCharHook(function(ch)
+    DisconnectCharConns()
+    task.spawn(function()
+        local ok, hum = pcall(function()
+            return ch:FindFirstChildOfClass("Humanoid") or ch:WaitForChild("Humanoid", 6)
+        end)
+        if ok and hum then
+            local c = hum.StateChanged:Connect(function(_, new)
+                if new == Enum.HumanoidStateType.Jumping then
+                    JumpTrigger()
+                end
+            end)
+            table.insert(CharConns, c)
+        end
+    end)
+end)
+
+-- trigger 2: jump request (covers mobile jump button / custom controls)
+TrackConnection(UserInputService.JumpRequest:Connect(function()
+    JumpTrigger()
+end))
+
+-- =====================================================================
+-- CLICK SPARKS · interactive impact bursts at the cursor ray
+-- =====================================================================
+SetClickSparks = function(on)
+    Settings.ClickSparks = on
+end
+
+TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not Settings.ClickSparks or gameProcessed then return end
+    local it = input.UserInputType
+    if it ~= Enum.UserInputType.MouseButton1 and it ~= Enum.UserInputType.Touch then return end
+    pcall(function()
+        local cam = GetCam()
+        if not cam then return end
+        local ray = cam:ScreenPointToRay(input.Position.X, input.Position.Y)
+        local hit = Workspace:Raycast(ray.Origin, ray.Direction * 800, MakeRayParams())
+        if not hit then return end
+        SpawnSparkBurst(hit.Position, math.floor(7 + 7 * math.clamp(Settings.ClickBurst, 0.5, 3)))
+        local basis = GroundBasis(hit.Position + hit.Normal * 0.05, hit.Normal)
+        local ring = New("Part", {
+            Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.12, 1.2, 1.2),
+            CFrame = basis, Anchored = true, CanCollide = false, CanQuery = false,
+            CanTouch = false, Material = Enum.Material.Neon,
+            Color = ThemeState.Accent, Transparency = 0.2, CastShadow = false,
+        }, FXFolder, false)
+        Tween(ring, {
+            Size = Vector3.new(0.02, 3.4, 3.4), Transparency = 1,
+        }, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+        task.delay(0.4, function() pcall(function() ring:Destroy() end) end)
+    end)
+end))
+
+-- =====================================================================
+-- CUSTOM CURSOR · neon reticle with trailing glow
+-- =====================================================================
+local CursorGui = New("ScreenGui", {
+    Name = "AuraXHub_Cursor", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 600, Enabled = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+ParentGui(CursorGui)
+
+local CursorRoot = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(200, 200),
+    Size = UDim2.fromOffset(2, 2), BackgroundTransparency = 1, BorderSizePixel = 0,
+}, CursorGui)
+local CursorScale = New("UIScale", {Scale = 1}, CursorRoot)
+
+local curDot = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(1, 1),
+    Size = UDim2.fromOffset(8, 8), BackgroundColor3 = ThemeState.Accent,
+    BorderSizePixel = 0, ZIndex = 3,
+}, CursorRoot)
+New("UICorner", {CornerRadius = UDim.new(1, 0)}, curDot)
+local curRing = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(1, 1),
+    Size = UDim2.fromOffset(26, 26), BackgroundTransparency = 1,
+    BorderSizePixel = 0, ZIndex = 2,
+}, CursorRoot)
+local curRingStroke = New("UIStroke", {
+    Color = ThemeState.Accent, Transparency = 0.25, Thickness = 1.6,
+}, curRing)
+local curCross1 = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(1, 1),
+    Size = UDim2.fromOffset(18, 1.5), BackgroundColor3 = ThemeState.Accent,
+    BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 2,
+}, CursorRoot)
+local curCross2 = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(1, 1),
+    Size = UDim2.fromOffset(1.5, 18), BackgroundColor3 = ThemeState.Accent,
+    BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 2,
+}, CursorRoot)
+
+local Ghosts = {}
+for i = 1, 7 do
+    local g = New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(1, 1),
+        Size = UDim2.fromOffset(7 - i * 0.5, 7 - i * 0.5),
+        BackgroundColor3 = ThemeState.Accent,
+        BackgroundTransparency = 0.4 + i * 0.08,
+        BorderSizePixel = 0, ZIndex = 1, Visible = false,
+    }, CursorRoot)
+    New("UICorner", {CornerRadius = UDim.new(1, 0)}, g)
+    Ghosts[i] = g
+end
+
+local function ApplyCursorStyle()
+    local st = Settings.CursorStyle
+    curDot.Visible    = (st == "Dot") or (st == "Cross")
+    curRing.Visible   = (st == "Dot") or (st == "Ring")
+    curCross1.Visible = (st == "Cross")
+    curCross2.Visible = (st == "Cross")
+end
+
+SetCursor = function(on)
+    Settings.Cursor = on
+    pcall(function() CursorGui.Enabled = on and true or false end)
+    pcall(function() UserInputService.MouseIconEnabled = not on end)
+end
+
+SetCursorStyle = function(style)
+    Settings.CursorStyle = style
+    pcall(ApplyCursorStyle)
+end
+
+SetCursorSize = function(v)
+    Settings.CursorSize = v
+    pcall(function() CursorScale.Scale = v end)
+end
+
+local HistMax, HistHead = 64, 0
+local Hist = {}
+
+AddUpdater(function(dt, t)
+    if not Settings.Cursor then return end
+    local m = Vector2.new(200, 200)
+    pcall(function() m = UserInputService:GetMouseLocation() end)
+    CursorRoot.Position = UDim2.fromOffset(m.X, m.Y)
+    HistHead = (HistHead % HistMax) + 1
+    Hist[HistHead] = m
+
+    local col
+    if Settings.CursorColor == "Rainbow" then
+        col = Color3.fromHSV((t * 0.4) % 1, 0.72, 1)
+    elseif Settings.CursorColor == "White" then
+        col = Color3.fromRGB(240, 240, 255)
+    elseif Settings.CursorColor == "Ice" then
+        col = Color3.fromRGB(150, 220, 255)
+    elseif Settings.CursorColor == "Rose" then
+        col = Color3.fromRGB(255, 120, 170)
+    else
+        col = ThemeState.Accent
+    end
+    curDot.BackgroundColor3 = col
+    curRingStroke.Color = col
+    curCross1.BackgroundColor3 = col
+    curCross2.BackgroundColor3 = col
+
+    if Settings.CursorTrail then
+        for i = 1, #Ghosts do
+            local back = i * 3
+            local idx = ((HistHead - back - 1) % HistMax) + 1
+            local p = Hist[idx] or m
+            local g = Ghosts[i]
+            g.Position = UDim2.fromOffset(p.X - m.X + 1, p.Y - m.Y + 1)
+            g.BackgroundColor3 = col
+            g.Visible = true
+        end
+    else
+        for i = 1, #Ghosts do
+            Ghosts[i].Visible = false
+        end
+    end
+end)
+
+-- =====================================================================
+-- CINEMATIC LETTERBOX + ASPECT FRAMING
+-- =====================================================================
+local OverlayGui = New("ScreenGui", {
+    Name = "AuraXHub_Overlay", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 220,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+ParentGui(OverlayGui)
+
+local function MakeBar(anchor, pos)
+    return New("Frame", {
+        AnchorPoint = anchor, Position = pos, Size = UDim2.new(0, 0, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(4, 5, 9), BorderSizePixel = 0, ZIndex = 5,
+    }, OverlayGui)
+end
+
+local Bars = {
+    top    = MakeBar(Vector2.new(0, 0), UDim2.new(0, 0, 0, 0)),
+    bottom = MakeBar(Vector2.new(0, 1), UDim2.new(0, 0, 1, 0)),
+    left   = MakeBar(Vector2.new(0, 0), UDim2.new(0, 0, 0, 0)),
+    right  = MakeBar(Vector2.new(1, 0), UDim2.new(1, 0, 0, 0)),
+}
+
+local TopHairline = New("Frame", {
+    AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0),
+    Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = ThemeState.Accent,
+    BackgroundTransparency = 0.75, BorderSizePixel = 0, Visible = false,
+}, Bars.top)
+MarkTheme(TopHairline, "fill")
+local BottomHairline = New("Frame", {
+    Position = UDim2.new(0, 0, 0, 0),
+    Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = ThemeState.Accent,
+    BackgroundTransparency = 0.75, BorderSizePixel = 0, Visible = false,
+}, Bars.bottom)
+MarkTheme(BottomHairline, "fill")
+
+local AspectRatios = {
+    ["21:9"] = 21 / 9,
+    ["16:9"] = 16 / 9,
+    ["4:3"]  = 4 / 3,
+    ["1:1"]  = 1,
+}
+
+local function ApplyBars(animate)
+    pcall(function()
+        local cam = GetCam()
+        if not cam then return end
+        local vp = cam.ViewportSize
+        local top, bottom, left, right = 0, 0, 0, 0
+        if Settings.Letterbox then
+            local h = vp.Y * (Settings.LetterboxHeight / 100)
+            top, bottom = h, h
+        elseif Settings.AspectMode ~= "Off" then
+            local r = AspectRatios[Settings.AspectMode]
+            if r then
+                local cur = vp.X / math.max(vp.Y, 1)
+                if cur > r then
+                    local w = (vp.X - vp.Y * r) / 2
+                    left, right = w, w
+                else
+                    local h = (vp.Y - vp.X / r) / 2
+                    top, bottom = h, h
+                end
+            end
+        end
+        local ti = animate and TweenInfo.new(0.4, Enum.EasingStyle.Sine, Enum.EasingDirection.Out) or TI
+        Tween(Bars.top,    {Size = UDim2.new(0, 0, 0, top)}, ti)
+        Tween(Bars.bottom, {Size = UDim2.new(0, 0, 0, bottom)}, ti)
+        Tween(Bars.left,   {Size = UDim2.new(0, left, 0, 0)}, ti)
+        Tween(Bars.right,  {Size = UDim2.new(0, right, 0, 0)}, ti)
+        local vh = (top > 1)
+        TopHairline.Visible = vh
+        BottomHairline.Visible = vh
+    end)
+end
+
+SetLetterbox = function(on)
+    Settings.Letterbox = on
+    if on then Settings.AspectMode = "Off" end
+    ApplyBars(true)
+end
+
+SetAspect = function(name)
+    Settings.AspectMode = name
+    if name ~= "Off" then Settings.Letterbox = false end
+    ApplyBars(true)
+end
+
+pcall(function()
+    local cam = GetCam()
+    if cam then
+        TrackConnection(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+            ApplyBars(false)
+        end))
+    end
+end)
+
+-- =====================================================================
+-- MOTION BLUR (velocity-reactive) + FOV
+-- =====================================================================
+local MotionBlur = nil
+local BlurCurrent = 0
+
+SetMotionBlur = function(on)
+    Settings.MotionBlur = on
+    if on and not (MotionBlur and MotionBlur.Parent) then
+        MotionBlur = New("BlurEffect", {Size = 0, Name = "AuraX_MotionBlur"}, Lighting)
+    end
+end
+
+AddUpdater(function(dt)
+    if not (MotionBlur and MotionBlur.Parent) then return end
+    local target = 0
+    if Settings.MotionBlur then
+        local speed = 0
+        pcall(function()
+            local root = Char.root
+            if root and root.Parent then
+                speed = root.AssemblyLinearVelocity.Magnitude
+            end
+        end)
+        target = Settings.BlurBase * (0.4 + math.clamp(speed / 70, 0, 1) * 0.9)
+    end
+    BlurCurrent = BlurCurrent + (target - BlurCurrent) * math.min(dt * 6, 1)
+    pcall(function() MotionBlur.Size = BlurCurrent end)
+end)
+
+SetFOV = function(v)
+    Settings.FOV = v
+    pcall(function()
+        local cam = GetCam()
+        if cam then cam.FieldOfView = v end
+    end)
+end
+
+-- =====================================================================
+-- WEATHER · rain, lightning, fog, time of day
+-- =====================================================================
+local RainPart, RainEmitter = nil, nil
+
+SetRainIntensity = function(v)
+    Settings.RainIntensity = v
+    pcall(function()
+        if RainEmitter and RainEmitter.Parent then
+            RainEmitter.Rate = math.floor(140 + 760 * math.clamp(v, 0, 1))
+        end
+    end)
+end
+
+SetRain = function(on)
+    Settings.Rain = on
+    pcall(function()
+        if on then
+            if not (RainPart and RainPart.Parent) then
+                RainPart = New("Part", {
+                    Name = "AuraX_Rain", Anchored = true, CanCollide = false,
+                    CanQuery = false, CanTouch = false, Transparency = 1,
+                    Size = Vector3.new(90, 1, 90), CastShadow = false,
+                }, FXFolder)
+                RainEmitter = New("ParticleEmitter", {
+                    Enabled = false,
+                    EmissionDirection = Enum.NormalId.Bottom,
+                    Orientation = Enum.ParticleOrientation.VelocityParallel,
+                    Color = ColorSequence.new(Color3.fromRGB(202, 214, 238)),
+                    Size = NumberSequence.new(0.13),
+                    Transparency = NumberSequence.new(0.35),
+                    Lifetime = NumberRange.new(0.8, 1.25),
+                    Speed = NumberRange.new(42, 58),
+                    Acceleration = Vector3.new(0, -70, 0),
+                    Squash = NumberSequence.new(3.2),
+                    LightInfluence = 0, LightEmission = 0.4, Brightness = 1.4,
+                    Rate = 0,
+                }, RainPart)
+            end
+            RainEmitter.Enabled = true
+            SetRainIntensity(Settings.RainIntensity)
+        else
+            if RainEmitter then RainEmitter.Enabled = false end
+            if RainPart then pcall(function() RainPart:Destroy() end) end
+            RainPart, RainEmitter = nil, nil
+        end
+    end)
+end
+
+AddUpdater(function()
+    pcall(function()
+        if RainPart and RainPart.Parent then
+            local cam = GetCam()
+            if cam then
+                RainPart.CFrame = CFrame.new(cam.CFrame.Position + Vector3.new(0, 26, 0))
+            end
+        end
+    end)
+end)
+
+-- lightning
+local LightningActive = false
+local AuraCC = nil
+
+local function LightningFlash(strength)
+    pcall(function()
+        if not (AuraCC and AuraCC.Parent) then
+            AuraCC = New("ColorCorrectionEffect", {Name = "AuraX_CC"}, Lighting)
+        end
+        AuraCC.Brightness = Vector3.new(strength, strength, strength * 1.08)
+        Tween(AuraCC, {Brightness = Vector3.new(0, 0, 0)},
+            TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+    end)
+end
+
+local function SpawnBolt()
+    pcall(function()
+        local base = nil
+        local root = Char.root
+        local cam = GetCam()
+        if root and root.Parent then
+            base = root.Position
+        elseif cam then
+            base = cam.CFrame.Position
+        end
+        if not base then return end
+        local ang = math.rad(RNG:NextNumber(0, 360))
+        local dist = RNG:NextNumber(24, 70)
+        local tx = base.X + math.cos(ang) * dist
+        local tz = base.Z + math.sin(ang) * dist
+        local top = Vector3.new(tx + RNG:NextNumber(-26, 26), 150, tz + RNG:NextNumber(-26, 26))
+        local bottom = Vector3.new(tx, 2, tz)
+        local hit = Workspace:Raycast(top, Vector3.new(0, -400, 0), MakeRayParams())
+        if hit then bottom = hit.Position end
+
+        local pts = {}
+        local SEGS = 7
+        for i = 0, SEGS do
+            local a = i / SEGS
+            local fade = (1 - a) * 3.4
+            pts[#pts + 1] = Vector3.new(
+                Lerp(top.X, bottom.X, a) + RNG:NextNumber(-fade, fade),
+                Lerp(top.Y, bottom.Y, a),
+                Lerp(top.Z, bottom.Z, a) + RNG:NextNumber(-fade, fade)
+            )
+        end
+        pts[#pts] = bottom
+
+        for i = 1, #pts - 1 do
+            local a, b = pts[i], pts[i + 1]
+            local len = (b - a).Magnitude
+            if len > 0.1 then
+                local seg = New("Part", {
+                    Size = Vector3.new(0.26, 0.26, len),
+                    CFrame = CFrame.lookAt((a + b) / 2, b),
+                    Anchored = true, CanCollide = false, CanQuery = false,
+                    CanTouch = false, Material = Enum.Material.Neon,
+                    Color = Color3.fromRGB(214, 226, 255), Transparency = 0.05,
+                    CastShadow = false,
+                }, FXFolder, false)
+                New("PointLight", {
+                    Color = Color3.fromRGB(200, 216, 255), Range = 14, Brightness = 2,
+                }, seg, false)
+                task.delay(0.14, function() pcall(function() seg:Destroy() end) end)
+            end
+        end
+        LightningFlash(0.5)
+        task.delay(0.13, function() LightningFlash(0.3) end)
+    end)
+end
+
+SetLightning = function(on)
+    Settings.Lightning = on
+    if on and not LightningActive then
+        LightningActive = true
+        task.spawn(function()
+            while LightningActive do
+                local waitT = RNG:NextNumber(4, 11)
+                local t0 = os.clock()
+                while LightningActive and os.clock() - t0 < waitT do
+                    task.wait(0.25)
+                end
+                if LightningActive then
+                    SpawnBolt()
+                end
+            end
+        end)
+    elseif not on then
+        LightningActive = false
+    end
+end
+
+-- fog
+SetFogDensity = function(v)
+    Settings.FogDensity = v
+    pcall(function()
+        if Settings.Fog then
+            local fe = 420 - 300 * math.clamp(v, 0, 1)
+            Lighting.FogEnd = fe
+            Lighting.FogStart = fe * 0.1
+            Lighting.FogColor = Color3.fromRGB(135, 145, 165)
+        end
+    end)
+end
+
+SetFog = function(on)
+    Settings.Fog = on
+    if on then
+        SetFogDensity(Settings.FogDensity)
+    else
+        pcall(function()
+            Lighting.FogColor = OriginalLighting.FogColor
+            Lighting.FogEnd   = OriginalLighting.FogEnd
+            Lighting.FogStart = OriginalLighting.FogStart
+        end)
+    end
+end
+
+-- time of day
+SetTimeOfDay = function(v)
+    Settings.TimeOfDay = v
+    pcall(function() Lighting.ClockTime = v end)
+end
+
+-- =====================================================================
+-- SKY PRESETS · cinematic environment moods
+-- =====================================================================
+local OurSky, OurAtmo = nil, nil
+
+local SkyPresets = {
+    ["Golden Dusk"] = {
+        ClockTime = 18.2, Brightness = 2.6,
+        Ambient = Color3.fromRGB(64, 48, 58), Outdoor = Color3.fromRGB(255, 172, 122),
+        FogColor = Color3.fromRGB(255, 165, 115), FogEnd = 900,
+        Stars = 60, Sun = 17, Moon = 0,
+        Atmo = {Density = 0.36, Haze = 2.1, Glare = 0.25,
+            Color = Color3.fromRGB(255, 178, 128), Decay = Color3.fromRGB(120, 82, 72)},
+    },
+    ["Midnight"] = {
+        ClockTime = 0.3, Brightness = 1.1,
+        Ambient = Color3.fromRGB(18, 20, 32), Outdoor = Color3.fromRGB(32, 36, 54),
+        FogColor = Color3.fromRGB(10, 12, 20), FogEnd = 650,
+        Stars = 2600, Sun = 0, Moon = 15,
+        Atmo = {Density = 0.4, Haze = 1.2, Glare = 0,
+            Color = Color3.fromRGB(40, 50, 80), Decay = Color3.fromRGB(20, 24, 40)},
+    },
+    ["Neon Void"] = {
+        ClockTime = 0, Brightness = 0.7,
+        Ambient = Color3.fromRGB(28, 18, 40), Outdoor = Color3.fromRGB(44, 24, 64),
+        FogColor = nil, FogEnd = 480, Void = true,
+        Stars = 3400, Sun = 0, Moon = 0,
+        Atmo = {Density = 0.5, Haze = 2.6, Glare = 0,
+            Color = Color3.fromRGB(84, 42, 124), Decay = Color3.fromRGB(30, 12, 52)},
+    },
+    ["Crystal Noon"] = {
+        ClockTime = 14.2, Brightness = 3.1,
+        Ambient = Color3.fromRGB(122, 127, 138), Outdoor = Color3.fromRGB(212, 222, 238),
+        FogColor = Color3.fromRGB(206, 222, 242), FogEnd = 1200,
+        Stars = 0, Sun = 16, Moon = 0,
+        Atmo = {Density = 0.3, Haze = 0.9, Glare = 0.1,
+            Color = Color3.fromRGB(200, 220, 250), Decay = Color3.fromRGB(160, 180, 212)},
+    },
+    ["Storm Front"] = {
+        ClockTime = 16.6, Brightness = 1.6,
+        Ambient = Color3.fromRGB(60, 64, 74), Outdoor = Color3.fromRGB(96, 101, 113),
+        FogColor = Color3.fromRGB(86, 93, 106), FogEnd = 520,
+        Stars = 0, Sun = 8, Moon = 0,
+        Atmo = {Density = 0.48, Haze = 2.8, Glare = 0,
+            Color = Color3.fromRGB(110, 118, 132), Decay = Color3.fromRGB(70, 76, 88)},
+    },
+}
+
+ApplySkyPreset = function(name)
+    Settings.SkyPreset = name
+    pcall(function()
+        if OurSky then pcall(function() OurSky:Destroy() end); OurSky = nil end
+        if OurAtmo then pcall(function() OurAtmo:Destroy() end); OurAtmo = nil end
+        if name == "Roblox Default" then
+            for k, v in pairs(OriginalLighting) do
+                pcall(function() Lighting[k] = v end)
+            end
+            if OriginalAtmosphere and OriginalAtmoProps then
+                for k, v in pairs(OriginalAtmoProps) do
+                    pcall(function() OriginalAtmosphere[k] = v end)
+                end
+            end
+            if OriginalSky and OriginalSkyProps then
+                for k, v in pairs(OriginalSkyProps) do
+                    pcall(function() OriginalSky[k] = v end)
+                end
+            end
+            return
+        end
+        local p = SkyPresets[name]
+        if not p then return end
+        Lighting.ClockTime      = p.ClockTime
+        Lighting.Brightness     = p.Brightness
+        Lighting.Ambient        = p.Ambient
+        Lighting.OutdoorAmbient = p.Outdoor
+        Lighting.FogEnd         = p.FogEnd
+        Lighting.FogStart       = p.FogEnd * 0.08
+        if p.Void then
+            Lighting.FogColor = ThemeState.Accent:Lerp(Color3.new(0, 0, 0), 0.55)
+        else
+            Lighting.FogColor = p.FogColor
+        end
+        local atmo = OriginalAtmosphere
+        if not atmo then
+            if not (OurAtmo and OurAtmo.Parent) then
+                OurAtmo = New("Atmosphere", {Name = "AuraX_Atmo"}, Lighting)
+            end
+            atmo = OurAtmo
+        end
+        for k, v in pairs(p.Atmo) do
+            pcall(function() atmo[k] = v end)
+        end
+        if OriginalSky then
+            pcall(function() OriginalSky.StarCount = p.Stars end)
+            pcall(function() OriginalSky.SunAngularSize = p.Sun end)
+            pcall(function() OriginalSky.MoonAngularSize = p.Moon end)
+        else
+            if not (OurSky and OurSky.Parent) then
+                OurSky = New("Sky", {Name = "AuraX_Sky"}, Lighting)
+            end
+            pcall(function() OurSky.StarCount = p.Stars end)
+            pcall(function() OurSky.SunAngularSize = p.Sun end)
+            pcall(function() OurSky.MoonAngularSize = p.Moon end)
+            pcall(function()
+                OurSky.CelestialBodiesShown = (p.Stars > 0 or p.Sun > 0 or p.Moon > 0)
+            end)
+        end
+    end)
+end
+
+-- =====================================================================
+-- UI AMBIENT BLUR (softens the world while the menu is open)
+-- =====================================================================
+local MenuBlur = nil
+local MenuBlurCurrent = 0
+
+AddUpdater(function(dt)
+    local target = 0
+    if Settings.UIBlur and MenuState ~= "closed" then target = 13 end
+    if not (MenuBlur and MenuBlur.Parent) then
+        if target > 0 then
+            MenuBlur = New("BlurEffect", {Size = 0, Name = "AuraX_MenuBlur"}, Lighting)
+        else
+            return
+        end
+    end
+    MenuBlurCurrent = MenuBlurCurrent + (target - MenuBlurCurrent) * math.min(dt * 8, 1)
+    pcall(function() MenuBlur.Size = MenuBlurCurrent end)
+end)
+
+-- =====================================================================
+-- FX ROOT INTEGRITY (self-healing if the game wipes client folders)
+-- =====================================================================
+local IntegrityT = 0
+AddUpdater(function(dt)
+    IntegrityT = IntegrityT + dt
+    if IntegrityT < 2 then return end
+    IntegrityT = 0
+    if not FXFolder.Parent then
+        FXFolder = New("Folder", {Name = "AuraXFX_Pro"}, Workspace)
+        if Settings.Hat then pcall(function() SetHat(true) end) end
+        if Settings.Orbs then pcall(function() SetOrbs(true) end) end
+        if Settings.Rain then pcall(function() SetRain(true) end) end
+    end
+end)
+
+-- =====================================================================
+-- FX SHUTDOWN TASK (invoked by Unload in part 4)
+-- =====================================================================
+TrackTask(function()
+    LightningActive = false
+    -- clear any live hollow jump rings
+    for i = 1, #ActiveRings do
+        pcall(function() ActiveRings[i].model:Destroy() end)
+    end
+    ActiveRings = {}
+    Settings.Chams = false
+    Settings.Hat = false
+    Settings.Orbs = false
+    Settings.FootSparks = false
+    Settings.ClickSparks = false
+    Settings.Cursor = false
+    Settings.Letterbox = false
+    Settings.MotionBlur = false
+    Settings.Rain = false
+    Settings.Fog = false
+    pcall(function() SetChams(false) end)
+    pcall(function() RestoreGlass() end)
+    pcall(function() SetHat(false) end)
+    pcall(function() SetOrbs(false) end)
+    pcall(function() SetCursor(false) end)
+    pcall(function() SetLetterbox(false) end)
+    pcall(function() SetMotionBlur(false) end)
+    pcall(function() SetRain(false) end)
+    pcall(function() SetFog(false) end)
+    pcall(function() UserInputService.MouseIconEnabled = true end)
+end)
+
+-- =====================================================================
+-- PART 4 · PAGE WIRING, INIT & UNLOAD
+-- =====================================================================
+
+Settings.FOV = OriginalFOV
+
+local function BuildPages()
+    local pgPlayer  = Pages[1]
+    local pgEffects = Pages[2]
+    local pgCamera  = Pages[3]
+    local pgWorld   = Pages[4]
+    local pgSettings = Pages[5]
+
+    -- ============================ PLAYER =============================
+    AddSection(pgPlayer, "Self Chams")
+    AddToggle(pgPlayer, "Enable Chams", Settings.Chams, function(v)
+        pcall(function() SetChams(v) end)
+    end)
+    AddToggle(pgPlayer, "Glass Body", Settings.ChamGlass, function(v)
+        pcall(function() SetChamsGlass(v) end)
+    end)
+    AddToggle(pgPlayer, "Rainbow Cycle", Settings.ChamRainbow, function(v)
+        Settings.ChamRainbow = v
+    end)
+    AddDropdown(pgPlayer, "Cham Color", {"Theme", "White", "Crimson", "Gold", "Ice"}, 1, function(opt)
+        Settings.ChamColor = opt
+    end)
+
+    AddSection(pgPlayer, "China Hat")
+    AddToggle(pgPlayer, "Enable Hat", Settings.Hat, function(v)
+        pcall(function() SetHat(v) end)
+    end)
+    AddSlider(pgPlayer, "Spin Speed", 0, 240, Settings.HatSpin, 0, function(v)
+        Settings.HatSpin = v
+    end)
+    AddToggle(pgPlayer, "RGB Cycle", Settings.HatRGB, function(v)
+        Settings.HatRGB = v
+    end)
+
+    AddSection(pgPlayer, "Jump FX")
+    AddToggle(pgPlayer, "Jump Circle", Settings.JumpCircle, function(v)
+        Settings.JumpCircle = v
+    end)
+
+    -- ============================ EFFECTS ============================
+    AddSection(pgEffects, "Elemental Orbs")
+    AddToggle(pgEffects, "Enable Orbs", Settings.Orbs, function(v)
+        pcall(function() SetOrbs(v) end)
+    end)
+    AddSlider(pgEffects, "Orb Count", 1, 8, Settings.OrbCount, 0, function(v)
+        pcall(function() SetOrbCount(v) end)
+    end)
+    AddToggle(pgEffects, "Rainbow Cycle", Settings.OrbRainbow, function(v)
+        Settings.OrbRainbow = v
+    end)
+
+    AddSection(pgEffects, "Footstep Sparks")
+    AddToggle(pgEffects, "Enable Sparks", Settings.FootSparks, function(v)
+        pcall(function() SetFootSparks(v) end)
+    end)
+    AddSlider(pgEffects, "Intensity", 0.2, 2, Settings.SparkIntensity, 1, function(v)
+        Settings.SparkIntensity = v
+    end)
+
+    AddSection(pgEffects, "Click Sparks")
+    AddToggle(pgEffects, "Enable Click FX", Settings.ClickSparks, function(v)
+        pcall(function() SetClickSparks(v) end)
+    end)
+    AddSlider(pgEffects, "Burst Size", 0.5, 3, Settings.ClickBurst, 1, function(v)
+        Settings.ClickBurst = v
+    end)
+
+    AddSection(pgEffects, "Custom Cursor")
+    AddToggle(pgEffects, "Enable Cursor FX", Settings.Cursor, function(v)
+        pcall(function() SetCursor(v) end)
+    end)
+    AddDropdown(pgEffects, "Style", {"Dot", "Ring", "Cross"}, 1, function(opt)
+        pcall(function() SetCursorStyle(opt) end)
+    end)
+    AddSlider(pgEffects, "Cursor Size", 0.6, 1.8, Settings.CursorSize, 2, function(v)
+        pcall(function() SetCursorSize(v) end)
+    end)
+    AddToggle(pgEffects, "Trail Glow", Settings.CursorTrail, function(v)
+        Settings.CursorTrail = v
+    end)
+    AddDropdown(pgEffects, "Cursor Color", {"Theme", "Rainbow", "White", "Ice", "Rose"}, 1, function(opt)
+        Settings.CursorColor = opt
+    end)
+
+    -- ============================ CAMERA =============================
+    AddSection(pgCamera, "Cinematic")
+    local aspectSet = nil
+    AddToggle(pgCamera, "Cinematic Letterbox", Settings.Letterbox, function(v)
+        pcall(function() SetLetterbox(v) end)
+        if v and aspectSet then pcall(function() aspectSet(1) end) end
+    end, "Letterbox")
+    AddSlider(pgCamera, "Bar Height", 6, 22, Settings.LetterboxHeight, 0, function(v)
+        Settings.LetterboxHeight = v
+        if Settings.Letterbox then pcall(function() SetLetterbox(true) end) end
+    end)
+
+    AddSection(pgCamera, "Framing")
+    _, aspectSet = AddDropdown(pgCamera, "Aspect Ratio", {"Off", "21:9", "16:9", "4:3", "1:1"}, 1, function(opt)
+        pcall(function() SetAspect(opt) end)
+        if opt ~= "Off" and ToggleSetters["Letterbox"] then
+            ToggleSetters["Letterbox"](false)
+        end
+    end)
+
+    AddSection(pgCamera, "Lens")
+    AddToggle(pgCamera, "Motion Blur", Settings.MotionBlur, function(v)
+        pcall(function() SetMotionBlur(v) end)
+    end)
+    AddSlider(pgCamera, "Blur Amount", 2, 20, Settings.BlurBase, 0, function(v)
+        Settings.BlurBase = v
+    end)
+    AddSlider(pgCamera, "Field of View", 40, 120, Settings.FOV, 0, function(v)
+        pcall(function() SetFOV(v) end)
+    end)
+
+    -- ============================ WORLD ==============================
+    AddSection(pgWorld, "Weather")
+    AddToggle(pgWorld, "Rain", Settings.Rain, function(v)
+        pcall(function() SetRain(v) end)
+    end)
+    AddSlider(pgWorld, "Rain Intensity", 0.05, 1, Settings.RainIntensity, 2, function(v)
+        pcall(function() SetRainIntensity(v) end)
+    end)
+    AddToggle(pgWorld, "Lightning", Settings.Lightning, function(v)
+        pcall(function() SetLightning(v) end)
+    end)
+
+    AddSection(pgWorld, "Atmosphere")
+    AddToggle(pgWorld, "Fog", Settings.Fog, function(v)
+        pcall(function() SetFog(v) end)
+    end)
+    AddSlider(pgWorld, "Fog Density", 0.1, 1, Settings.FogDensity, 2, function(v)
+        pcall(function() SetFogDensity(v) end)
+    end)
+    AddSlider(pgWorld, "Time of Day", 0, 24, Settings.TimeOfDay, 1, function(v)
+        pcall(function() SetTimeOfDay(v) end)
+    end)
+
+    AddSection(pgWorld, "Sky Preset")
+    AddDropdown(pgWorld, "Environment", {
+        "Roblox Default", "Golden Dusk", "Midnight", "Neon Void", "Crystal Noon", "Storm Front",
+    }, 1, function(opt)
+        pcall(function() ApplySkyPreset(opt) end)
+        if opt ~= "Roblox Default" then
+            Notify("Sky preset: " .. opt, "info")
+        end
+    end)
+
+    -- ============================ SETTINGS ===========================
+    AddSection(pgSettings, "Theme")
+    local themeRow = New("Frame", {
+        Size = UDim2.new(1, -6, 0, 42), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = #pgSettings:GetChildren(),
+    }, pgSettings)
+    local tList = New("Frame", {
+        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), BorderSizePixel = 0,
+    }, themeRow)
+    New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, tList)
+
+    local themeNames = {"Neon Purple", "Cyan", "Emerald", "Sunset", "Custom"}
+    local themeRings = {}
+    for i = 1, #themeNames do
+        local nm = themeNames[i]
+        local b = New("TextButton", {
+            Size = UDim2.fromOffset(26, 26), Text = "", AutoButtonColor = false,
+            BackgroundColor3 = Themes[nm] or Color3.new(1, 1, 1), BorderSizePixel = 0,
+        }, tList)
+        New("UICorner", {CornerRadius = UDim.new(1, 0)}, b)
+        local ring = New("UIStroke", {Color = COL.LINE, Transparency = 0.8, Thickness = 1.2}, b)
+        if nm == "Custom" then
+            New("UIGradient", {
+                Color = ColorSequence.new({
+                    ColorSequenceKeypoint.new(0,    Color3.fromRGB(255, 90, 90)),
+                    ColorSequenceKeypoint.new(0.25, Color3.fromRGB(255, 210, 90)),
+                    ColorSequenceKeypoint.new(0.5,  Color3.fromRGB(110, 235, 140)),
+                    ColorSequenceKeypoint.new(0.75, Color3.fromRGB(90, 190, 255)),
+                    ColorSequenceKeypoint.new(1,    Color3.fromRGB(190, 110, 255)),
+                }),
+            }, b)
+        end
+        b.Activated:Connect(function()
+            ApplyTheme(nm)
+            if nm == "Custom" then
+                Notify("Custom RGB applied", "info")
+            end
+        end)
+        themeRings[nm] = ring
+    end
+
+    AddThemeHook(function(name)
+        for nm, ring in pairs(themeRings) do
+            local active = (nm == name)
+            pcall(function()
+                ring.Transparency = active and 0.1 or 0.8
+                ring.Thickness = active and 2.2 or 1.2
+            end)
+        end
+    end)
+
+    local themeHint = New("TextLabel", {
+        Size = UDim2.new(1, -6, 0, 14), BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham, Text = "Tap a dot - Custom follows the RGB sliders below",
+        TextSize = 10, TextColor3 = COL.SUB, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = #pgSettings:GetChildren(),
+    }, pgSettings)
+
+    -- live hex preview of the Custom RGB mix
+    local prevRow = New("Frame", {
+        Size = UDim2.new(1, -6, 0, 34), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = #pgSettings:GetChildren(),
+    }, pgSettings)
+    New("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(2, 0),
+        Size = UDim2.new(1, -130, 1, 0), Font = Enum.Font.GothamMedium,
+        Text = "Custom Preview", TextSize = 12, TextColor3 = COL.TEXT,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, prevRow)
+    local prevHex = New("TextLabel", {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -56, 0.5, 0),
+        Size = UDim2.fromOffset(66, 16), BackgroundTransparency = 1,
+        Font = Enum.Font.Code, Text = "#000000", TextSize = 10,
+        TextColor3 = COL.SUB, TextXAlignment = Enum.TextXAlignment.Right,
+    }, prevRow)
+    local prevSwatch = New("Frame", {
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -2, 0.5, 0),
+        Size = UDim2.fromOffset(46, 20), BackgroundColor3 = Color3.fromRGB(120, 200, 255),
+        BorderSizePixel = 0,
+    }, prevRow)
+    New("UICorner", {CornerRadius = UDim.new(0, 6)}, prevSwatch)
+    New("UIStroke", {Color = COL.LINE, Transparency = 0.85, Thickness = 1}, prevSwatch)
+
+    local function UpdateRGBPreview()
+        pcall(function()
+            local r = math.clamp(math.floor(Settings.CustomR + 0.5), 0, 255)
+            local g = math.clamp(math.floor(Settings.CustomG + 0.5), 0, 255)
+            local b = math.clamp(math.floor(Settings.CustomB + 0.5), 0, 255)
+            prevSwatch.BackgroundColor3 = Color3.fromRGB(r, g, b)
+            prevHex.Text = string.format("#%02X%02X%02X", r, g, b)
+        end)
+    end
+
+    AddSlider(pgSettings, "Custom R", 0, 255, Settings.CustomR, 0, function(v)
+        Settings.CustomR = math.floor(v)
+        UpdateRGBPreview()
+        if Settings.Theme == "Custom" then ApplyTheme("Custom") end
+    end)
+    AddSlider(pgSettings, "Custom G", 0, 255, Settings.CustomG, 0, function(v)
+        Settings.CustomG = math.floor(v)
+        UpdateRGBPreview()
+        if Settings.Theme == "Custom" then ApplyTheme("Custom") end
+    end)
+    AddSlider(pgSettings, "Custom B", 0, 255, Settings.CustomB, 0, function(v)
+        Settings.CustomB = math.floor(v)
+        UpdateRGBPreview()
+        if Settings.Theme == "Custom" then ApplyTheme("Custom") end
+    end)
+    UpdateRGBPreview()
+
+    AddSection(pgSettings, "Interface")
+    AddToggle(pgSettings, "UI Background Blur", Settings.UIBlur, function(v)
+        Settings.UIBlur = v
+    end)
+
+    AddSection(pgSettings, "About")
+    local aboutLines = {
+        "AuraX Hub - Ultimate Pro v" .. VERSION .. " (Fixed & Polished)",
+        "Spring intro - hollow jump ring - glass chams",
+        "100% client-side visuals, nothing replicates",
+        "PC: RightShift  |  Mobile: floating orb",
+    }
+    for i = 1, #aboutLines do
+        New("TextLabel", {
+            Size = UDim2.new(1, -6, 0, 15), BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, Text = aboutLines[i], TextSize = 11,
+            TextColor3 = COL.SUB, TextXAlignment = Enum.TextXAlignment.Left,
+            LayoutOrder = #pgSettings:GetChildren(),
+        }, pgSettings)
+    end
+    AddButton(pgSettings, "Unload AuraX", function()
+        pcall(Unload)
+    end, true)
+end
+
+-- // INIT ----------------------------------------------------------------
+pcall(function()
+    BuildPages()
+    ApplyTheme(Settings.Theme)
+end)
+
+ScriptReady = true
+task.spawn(function()
+    if LocalPlayer.Character then
+        pcall(HandleCharacter, LocalPlayer.Character)
+    end
+end)
+task.delay(0.6, function()
+    pcall(BuildPreview)
+end)
+
+-- console banner
+local exName = ""
+pcall(function()
+    if type(identifyexecutor) == "function" then
+        exName = tostring(identifyexecutor())
+    end
+end)
+print("==========================================")
+print("  AURAX HUB - ULTIMATE PRO v" .. VERSION .. " (Fixed & Polished)")
+print("  client-side visual suite loaded"
+    .. (exName ~= "" and ("  |  " .. exName) or ""))
+print("  RightShift or the floating orb to toggle")
+print("==========================================")
+
+-- INTRO / ACTIVATION (v3.1): branded splash, then spring the menu open
+-- (only auto-opens if the user has not already toggled it themselves)
+task.delay(0.2, function()
+    pcall(function()
+        PlayIntro(function()
+            pcall(function()
+                if MenuState == "closed" then
+                    SetMenu("open")
+                end
+            end)
+        end)
+    end)
+end)
+
+task.delay(2.0, function()
+    pcall(function()
+        Notify("AuraX Hub Ultimate Pro v" .. VERSION .. " loaded", "success")
+        Notify("RightShift or the orb button to toggle", "info")
+    end)
+end)
+
+-- // COMPLETE UNLOAD --------------------------------------------------------
+local Unloaded = false
+
+Unload = function()
+    if Unloaded then return end
+    Unloaded = true
+
+    -- 1) stop effect loops, restore character + world toggles
+    for i = 1, #Registry.tasks do
+        pcall(Registry.tasks[i])
+    end
+
+    -- 2) disconnect every tracked connection
+    for i = 1, #Registry.connections do
+        pcall(function() Registry.connections[i]:Disconnect() end)
+    end
+
+    -- 3) restore Lighting exactly as we found it
+    pcall(function()
+        for k, v in pairs(OriginalLighting) do
+            pcall(function() Lighting[k] = v end)
+        end
+        if OriginalAtmosphere and OriginalAtmoProps then
+            for k, v in pairs(OriginalAtmoProps) do
+                pcall(function() OriginalAtmosphere[k] = v end)
+            end
+        end
+        if OriginalSky and OriginalSkyProps then
+            for k, v in pairs(OriginalSkyProps) do
+                pcall(function() OriginalSky[k] = v end)
+            end
+        end
+    end)
+
+    -- 4) restore camera + input state
+    pcall(function()
+        local cam = GetCam()
+        if cam then cam.FieldOfView = OriginalFOV end
+    end)
+    pcall(function() UserInputService.MouseIconEnabled = true end)
+
+    -- 5) destroy every tracked instance (GUIs, FX folder, blur, CC, sky...)
+    for i = 1, #Registry.objects do
+        pcall(function() Registry.objects[i]:Destroy() end)
+    end
+
+    _G.__AURAX_PRO_UNLOAD = nil
+    _G.__AURAX_UNLOADING  = nil
+    print("[AuraX] Ultimate Pro unloaded - all client effects removed.")
+end
+
+_G.__AURAX_PRO_UNLOAD = Unload
