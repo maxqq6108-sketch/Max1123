@@ -1,0 +1,4724 @@
+--[[
+    Собрано из частей: p01_env.lua, p02_theme.lua, p03_files.lua, p04_nvg.lua, p05_icons.lua, p06_kit.lua, p07_audio.lua, p08_karaoke.lua, p09_ui.lua, p10_panels.lua, p11_logic.lua
+]]
+
+--═══════════════════════════════════════════════════════════════════════════════
+--  ███╗   ██╗ ██████╗ ██╗   ██╗ █████╗     ███╗   ███╗██╗   ██╗███████╗██╗ ██████╗
+--  ████╗  ██║██╔═══██╗██║   ██║██╔══██╗    ████╗ ████║██║   ██║██╔════╝██║██╔════╝
+--  ██╔██╗ ██║██║   ██║██║   ██║███████║    ██╔████╔██║██║   ██║█████╗  ██║██║     
+--  ██║╚██╗██║██║   ██║╚██╗ ██╔╝██╔══██║    ██║╚██╔╝██║██║   ██║██╔══╝  ██║██║     
+--  ██║ ╚████║╚██████╔╝ ╚████╔╝ ██║  ██║    ██║ ╚═╝ ██║╚██████╔╝███████╗██║╚██████╗
+--  ╚═╝  ╚═══╝ ╚═════╝   ╚═══╝  ╚═╝  ╚═╝    ╚═╝     ╚═╝ ╚═════╝ ╚══════╝╚═╝ ╚═════╝
+--
+--  NOVA MUSIC v1.0.0 — продвинутый музыкальный плеер в стиле Spotify
+--  Полностью авторский интерфейс и архитектура. Для Roblox Executors (Luau).
+--
+--  ВОЗМОЖНОСТИ:
+--   • Файловая система: NovaMusicData/, NovaMusicData/Songs/, config.json
+--   • Автосканирование библиотеки (listfiles) до 50+ треков, демо-записи
+--   • Spotify-подобная тёмная эстетика: градиенты, UICorner, UIStroke
+--   • Smart UI — служебные элементы плавно исчезают при бездействии
+--   • Полностью программные векторные иконки (растеризатор полигонов NVG)
+--   • Премиальное интро, микроанимации, плавные переходы (TweenService)
+--   • Горячие клавиши: ↑/↓ — плейлист, Пробел — пауза, ←/→ — перемотка,
+--     M — звук, L — зацикливание, S — шаффл, K — караоке, F — поиск,
+--     RCtrl — скрыть/показать окно, Esc — закрыть панели
+--   • Караоке-модуль: слова появляются в такт, эффект живого текста
+--   • Звуковые фильтры (Bass/Vocal/Treble/Reverb/Wide/Nightcore/Lo-Fi),
+--     зацикливание (off/all/one), шаффл, слайдеры громкости и перемотки
+--
+--  КАК ДОБАВИТЬ СВОИ ТРЕКИ:
+--   Положите в NovaMusicData/Songs файл формата:
+--   { "title": "Название", "artist": "Автор", "id": 123456789,
+--     "duration": 210, "lyrics": [ { "t": 0.0, "line": "Текст строки..." } ] }
+--   Шаблон появится автоматически: NovaMusicData/Songs/_template.json
+--
+--  ЗАПУСК: loadstring(readfile("путь/NovaMusic.lua"))()
+--  API:    getgenv().NovaMusic  → Toggle/Show/Hide/Unload/API
+--═══════════════════════════════════════════════════════════════════════════════
+
+-- Повторный запуск: мягко выгружаем предыдущую копию
+if getgenv and getgenv().NovaMusic and type(getgenv().NovaMusic.Unload) == "function" then
+	pcall(function() getgenv().NovaMusic.Unload() end)
+	task.wait(0.1)
+end
+
+local Nova = {
+	version  = "1.0.0",
+	running  = true,
+	conns    = {},   -- все соединения для unload
+	instances = {},  -- ключевые Instance для unload
+	tweens   = {},   -- активные твины для отмены
+	uid      = 0,
+}
+
+if getgenv then
+	getgenv().NovaMusic = nil -- временно, финальный экспорт в конце
+end
+
+--────────────────────────────── Сервисы ──────────────────────────────
+local TweenService   = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService     = game:GetService("RunService")
+local HttpService    = game:GetService("HttpService")
+local SoundService   = game:GetService("SoundService")
+local ContentProvider = game:GetService("ContentProvider")
+local Players        = game:GetService("Players")
+local GuiService     = game:GetService("GuiService")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+	-- короткое ожидание вместо вечного :Wait() — не подвешиваем запуск
+	local deadline = os.clock() + 2
+	while not LocalPlayer and os.clock() < deadline do
+		task.wait(0.05)
+		LocalPlayer = Players.LocalPlayer
+	end
+end
+local Mouse = LocalPlayer and LocalPlayer:GetMouse()
+
+Nova.services = {
+	Tween = TweenService, Input = UserInputService, Run = RunService,
+	Http = HttpService, Sound = SoundService, Content = ContentProvider,
+	Players = Players, Gui = GuiService, Player = LocalPlayer,
+}
+
+--────────────────────────────── Исполнитель ──────────────────────────
+local executorName = "Unknown Executor"
+pcall(function()
+	if type(identifyexecutor) == "function" then
+		executorName = tostring(identifyexecutor()) or "Unknown"
+	end
+end)
+Nova.executor = executorName
+
+--────────────────────────────── Слой файловой системы ────────────────
+-- Универсальная обёртка: любой экзекутор без writefile/listfiles не сломает скрипт.
+local FS = { ok = false, caps = {}, memFiles = {}, memWarned = false }
+Nova.FS = FS
+
+local function tryCap(name, fn)
+	local ok = pcall(fn)
+	FS.caps[name] = ok
+	return ok
+end
+
+-- Многие экзекуторы требуют существующую папку: создаём корень до пробы
+pcall(function() makefolder("NovaMusicData") end)
+
+FS.ok = tryCap("writefile", function() writefile("NovaMusicData/.probe", "1") end)
+if FS.ok then
+	FS.caps.readfile  = tryCap("readfile",  function() readfile("NovaMusicData/.probe") end)
+	FS.caps.isfile    = tryCap("isfile",    function() isfile("NovaMusicData/.probe") end)
+	FS.caps.isfolder  = tryCap("isfolder",  function() isfolder("NovaMusicData") end)
+	FS.caps.makefolder= tryCap("makefolder",function() end)
+	FS.caps.listfiles = tryCap("listfiles", function() listfiles("NovaMusicData") end)
+	FS.caps.delfile   = tryCap("delfile",   function() delfile("NovaMusicData/.probe") end)
+else
+	-- Полностью in-memory режим (экстремальный fallback)
+	FS.caps.readfile, FS.caps.isfile, FS.caps.isfolder = true, true, true
+	FS.caps.makefolder, FS.caps.listfiles, FS.caps.delfile = true, true, true
+	function FS.memWarn()
+		if not FS.memWarned then
+			FS.memWarned = true
+			warn("[NovaMusic] Файловая система недоступна — работаю в памяти. Конфиг и библиотека не сохранятся между сессиями.")
+		end
+	end
+end
+
+function FS.isFile(path)
+	if not FS.ok then return FS.memFiles[path] ~= nil end
+	local ok, res = pcall(isfile, path)
+	return ok and res or false
+end
+
+function FS.isFolder(path)
+	if not FS.ok then return false end
+	local ok, res = pcall(isfolder, path)
+	return ok and res or false
+end
+
+function FS.makeFolder(path)
+	if not FS.ok then return false end
+	local ok = pcall(makefolder, path)
+	return ok
+end
+
+function FS.ensureFolder(path)
+	if FS.isFolder(path) then return true end
+	return FS.makeFolder(path)
+end
+
+function FS.read(path)
+	if not FS.ok then return FS.memFiles[path] end
+	local ok, res = pcall(readfile, path)
+	if ok then return res end
+	return nil
+end
+
+function FS.write(path, data)
+	if not FS.ok then
+		FS.memWarn()
+		FS.memFiles[path] = data
+		return true
+	end
+	return pcall(writefile, path, data)
+end
+
+function FS.delete(path)
+	if not FS.ok then
+		FS.memFiles[path] = nil
+		return true
+	end
+	return pcall(delfile, path)
+end
+
+function FS.list(folder)
+	if not FS.ok then
+		local out = {}
+		for p in pairs(FS.memFiles) do
+			if p:sub(1, #folder + 1) == folder .. "/" and not p:find("/", #folder + 2, true) then
+				out[#out + 1] = p
+			end
+		end
+		return out
+	end
+	local ok, res = pcall(listfiles, folder)
+	if ok and type(res) == "table" then return res end
+	return {}
+end
+
+--────────────────────────────── JSON ─────────────────────────────────
+function Nova.jsonEncode(tbl)
+	local ok, res = pcall(function() return HttpService:JSONEncode(tbl) end)
+	if ok then return res end
+	return "{}"
+end
+
+function Nova.jsonDecode(str)
+	if type(str) ~= "string" or #str == 0 then return nil end
+	local ok, res = pcall(function() return HttpService:JSONDecode(str) end)
+	if ok then return res end
+	return nil
+end
+
+--────────────────────────────── Утилиты ──────────────────────────────
+local unpack = table.unpack or unpack
+Nova.util = {}
+
+local U = Nova.util
+
+function U.clamp(v, a, b) if v < a then return a elseif v > b then return b end return v end
+function U.lerp(a, b, t) return a + (b - a) * t end
+function U.round(v, dec)
+	local m = 10 ^ (dec or 0)
+	return math.floor(v * m + 0.5) / m
+end
+
+-- Формат времени mm:ss
+function U.fmtTime(sec)
+	if type(sec) ~= "number" or sec ~= sec or sec < 0 then return "0:00" end
+	local m = math.floor(sec / 60)
+	local s = math.floor(sec % 60)
+	return string.format("%d:%02d", m, s)
+end
+
+-- FNV-1a хеш строки → стабильное число (для сидов обложек/лирики)
+function U.hash(str)
+	local h = 2166136261
+	str = tostring(str or "")
+	for i = 1, #str do
+		h = (h * 16777619 + string.byte(str, i)) % 4294967296
+	end
+	return h
+end
+
+function U.seededRandom(seed)
+	local s = (tonumber(seed) or 1) % 2147483647
+	if s <= 0 then s = s + 2147483646 end
+	return function(min, max)
+		s = (s * 16807) % 2147483647
+		if min and max then return min + (s / 2147483647) * (max - min) end
+		return s / 2147483647
+	end
+end
+
+function U.deepCopy(t)
+	if type(t) ~= "table" then return t end
+	local r = {}
+	for k, v in pairs(t) do r[k] = U.deepCopy(v) end
+	return r
+end
+
+function U.deepMerge(base, override)
+	local r = U.deepCopy(base)
+	if type(override) == "table" then
+		for k, v in pairs(override) do
+			if type(v) == "table" and type(r[k]) == "table" then
+				r[k] = U.deepMerge(r[k], v)
+			else
+				r[k] = U.deepCopy(v)
+			end
+		end
+	end
+	return r
+end
+
+function U.indexOf(arr, val)
+	for i = 1, #arr do if arr[i] == val then return i end end
+	return nil
+end
+
+function U.uid()
+	Nova.uid = Nova.uid + 1
+	return Nova.uid
+end
+
+-- Ограничитель частоты вызовов
+function U.debounce(sec, fn)
+	local last = 0
+	return function(...)
+		local now = os.clock()
+		if now - last >= sec then
+			last = now
+			return fn(...)
+		end
+	end
+end
+
+-- Lower с поддержкой кириллицы (string.lower понимает только ASCII)
+function U.lowerRu(str)
+	str = tostring(str or ""):lower() -- ASCII-часть
+	local out = {}
+	local i, n = 1, #str
+	while i <= n do
+		local b1 = str:byte(i)
+		local b2 = str:byte(i + 1)
+		if b1 == 0xD0 and b2 then
+			if b2 == 0x81 then
+				-- Ё (D0 81) → ё (D1 91)
+				out[#out + 1] = "\xD1\x91"
+				i = i + 2
+			elseif b2 >= 0x90 and b2 <= 0x9F then
+				-- А..П (D0 90..9F) → а..п (D0 B0..BF)
+				out[#out + 1] = string.char(0xD0, b2 + 0x20)
+				i = i + 2
+			elseif b2 >= 0xA0 and b2 <= 0xAF then
+				-- Р..Я (D0 A0..AF) → р..я (D1 80..8F)
+				out[#out + 1] = string.char(0xD1, b2 - 0x20)
+				i = i + 2
+			else
+				out[#out + 1] = string.char(b1, b2)
+				i = i + 2
+			end
+		else
+			out[#out + 1] = string.char(b1)
+			i = i + 1
+		end
+	end
+	return table.concat(out)
+end
+
+-- Отложенный вызов с перезапуском (сохранение конфига)
+function U.idle(sec, fn)
+	local token = { alive = true }
+	local function schedule(...)
+		local args = { ... }
+		token.alive = false
+		local newToken = { alive = true }
+		task.delay(sec, function()
+			if newToken.alive then fn(unpack(args)) end
+		end)
+		return newToken
+	end
+	local f
+	f = function(...)
+		token = schedule(...)
+	end
+	return f
+end
+
+function U.trackConn(conn)
+	Nova.conns[#Nova.conns + 1] = conn
+	return conn
+end
+
+function U.trackInstance(inst)
+	Nova.instances[#Nova.instances + 1] = inst
+	return inst
+end
+
+--────────────────────────────── Сигналы ──────────────────────────────
+local Signal = {}
+Signal.__index = Signal
+
+function Signal.new()
+	return setmetatable({ _handlers = {} }, Signal)
+end
+
+function Signal:Connect(fn)
+	local handlers = self._handlers
+	local entry = { fn = fn, once = false }
+	handlers[#handlers + 1] = entry
+	return {
+		Disconnect = function()
+			for i, h in ipairs(handlers) do
+				if h == entry then table.remove(handlers, i) break end
+			end
+		end
+	}
+end
+
+function Signal:Once(fn)
+	local handlers = self._handlers
+	local entry = { fn = fn, once = true }
+	handlers[#handlers + 1] = entry
+	return {
+		Disconnect = function()
+			for i, h in ipairs(handlers) do
+				if h == entry then table.remove(handlers, i) break end
+			end
+		end
+	}
+end
+
+function Signal:Fire(...)
+	local nargs = select("#", ...)
+	local args = { ... }
+	-- снимок: once-обработчики должны сработать, но остаться в списке до вызова
+	local snapshot = {}
+	for i, h in ipairs(self._handlers) do snapshot[i] = h end
+	for i = #self._handlers, 1, -1 do
+		if self._handlers[i].once then table.remove(self._handlers, i) end
+	end
+	for _, h in ipairs(snapshot) do
+		task.spawn(h.fn, unpack(args, 1, nargs))
+	end
+end
+
+function Signal:Destroy()
+	self._handlers = {}
+end
+
+Nova.Signal = Signal
+
+-- Событийная шина приложения
+Nova.bus = {
+	TrackChanged  = Signal.new(),  -- (track, index)
+	StateChanged  = Signal.new(),  -- (playing:boolean)
+	TimeUpdated   = Signal.new(),  -- (time, duration)
+	VolumeChanged = Signal.new(),  -- (volume, muted)
+	EffectChanged = Signal.new(),  -- (effectsTable)
+	LoopChanged   = Signal.new(),  -- (mode)
+	ShuffleChanged= Signal.new(),  -- (bool)
+	LibChanged    = Signal.new(),  -- (tracks)
+	SelectChanged = Signal.new(),  -- (index)
+	ConfigChanged = Signal.new(),  -- (config)
+	Toast         = Signal.new(),  -- (text, kind)
+	FilterChanged = Signal.new(),  -- (query)
+	AccentChanged = Signal.new(),  -- (key, accentTable)
+	KaraokeLine   = Signal.new(),  -- (lineData, wordIndex)
+	KaraokeWord   = Signal.new(),  -- (wordIndex)
+	KaraokeToggle = Signal.new(),  -- (enabled)
+	QueueTick     = Signal.new(),  -- внутренний тик симуляции
+}
+
+--══════════════════════════════ Часть 2: Тема и стиль ═══════════════════════════
+-- Глубокая «дорогая» палитра в духе Spotify, но со своим характером: тёплый чёрный,
+-- мягкие поверхности, стеклянные панели и аурора-акцент.
+
+local Theme = {}
+Nova.theme = Theme
+
+Theme.meta = {
+	name = "NOVA MUSIC",
+	version = Nova.version,
+}
+
+-- Базовые цвета
+Theme.colors = {
+	bg          = Color3.fromRGB(11, 11, 15),      -- фон окна (глубокий)
+	bgSoft      = Color3.fromRGB(16, 16, 22),      -- чуть светлее
+	surface     = Color3.fromRGB(22, 22, 30),      -- панели
+	surfaceHi   = Color3.fromRGB(30, 30, 41),      -- ховер панели
+	row         = Color3.fromRGB(24, 24, 33),      -- строка плейлиста
+	rowHover    = Color3.fromRGB(34, 34, 47),      -- ховер строки
+	rowActive   = Color3.fromRGB(38, 34, 54),      -- активная строка
+	stroke      = Color3.fromRGB(255, 255, 255),   -- для UIStroke (с transparency)
+	text        = Color3.fromRGB(240, 240, 246),   -- основной текст
+	textDim     = Color3.fromRGB(150, 152, 168),   -- приглушённый
+	textFaint   = Color3.fromRGB(100, 102, 118),   -- ещё тише
+	shadow      = Color3.fromRGB(0, 0, 0),
+	white       = Color3.fromRGB(255, 255, 255),
+	black       = Color3.fromRGB(0, 0, 0),
+	danger      = Color3.fromRGB(255, 92, 110),
+	ok          = Color3.fromRGB(96, 220, 160),
+}
+
+-- Акцентные пресеты: [ключ] = { имя, c1, c2, плоский цвет }
+Theme.accents = {
+	aurora  = { name = "Aurora",  c1 = Color3.fromRGB(96, 226, 255), c2 = Color3.fromRGB(168, 120, 255), flat = Color3.fromRGB(122, 176, 255) },
+	sunset  = { name = "Sunset",  c1 = Color3.fromRGB(255, 170, 96),  c2 = Color3.fromRGB(255, 96, 168),  flat = Color3.fromRGB(255, 140, 130) },
+	mint    = { name = "Mint",    c1 = Color3.fromRGB(120, 240, 190), c2 = Color3.fromRGB(64, 180, 235),  flat = Color3.fromRGB(110, 214, 205) },
+	royal   = { name = "Royal",   c1 = Color3.fromRGB(150, 140, 255), c2 = Color3.fromRGB(255, 110, 199), flat = Color3.fromRGB(196, 132, 233) },
+}
+
+local function accentObj(key)
+	return Theme.accents[key] or Theme.accents.aurora
+end
+
+-- Активный акцент (переключается в настройках)
+Theme.accentKey = "aurora"
+Theme.accent = accentObj(Theme.accentKey)
+
+function Theme.setAccent(key)
+	if Theme.accents[key] then
+		Theme.accentKey = key
+		Theme.accent = accentObj(key)
+		Nova.bus.AccentChanged = Nova.bus.AccentChanged or Nova.Signal.new()
+		Nova.bus.AccentChanged:Fire(key, Theme.accent)
+	end
+end
+
+-- Цвет текста на акцентной заливке
+function Theme.onAccent()
+	local c = Theme.accent.flat
+	local lum = 0.299 * c.R + 0.587 * c.G + 0.114 * c.B
+	if lum > 0.55 then return Color3.fromRGB(18, 18, 24) end
+	return Color3.fromRGB(255, 255, 255)
+end
+
+-- Шрифты (стандартный гротеск Роблокса, без внешних ассетов)
+Theme.fonts = {
+	black   = Enum.Font.GothamBlack,
+	bold    = Enum.Font.GothamBold,
+	semi    = Enum.Font.GothamMedium,
+	regular = Enum.Font.Gotham,
+	mono    = Enum.Font.Code,
+}
+
+-- Радиусы
+Theme.radius = {
+	xs = 6, sm = 9, md = 13, lg = 18, xl = 24, pill = 999,
+}
+
+-- Пресеты TweenInfo — единый «язык движения» интерфейса
+Theme.motion = {
+	instant = TweenInfo.new(0.06, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+	fast    = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	base    = TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	smooth  = TweenInfo.new(0.38, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+	slow    = TweenInfo.new(0.60, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+	spring  = TweenInfo.new(0.52, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+	pop     = TweenInfo.new(0.30, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out),
+	intro   = TweenInfo.new(0.85, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+}
+
+-- Геометрия окна
+Theme.window = {
+	size = Vector2.new(986, 640),
+	minSize = Vector2.new(760, 520),
+}
+
+-- Читаемая тень: многослойные обводки вместо блюра
+Theme.layers = {
+	headerH = 62,
+	sidebarW = 218,
+	playerH = 104,
+}
+
+--══════════════════════════ Часть 3: Файлы, конфиг, библиотека ══════════════════════════
+-- Корневая папка NovaMusicData, подпапка Songs, config.json, автоскан и демо-записи.
+
+local FS = Nova.FS
+local U = Nova.util
+local bus = Nova.bus
+
+local ROOT  = "NovaMusicData"
+local SONGS = ROOT .. "/Songs"
+Nova.paths = { root = ROOT, songs = SONGS }
+
+--────────────────────────── Дерево папок ──────────────────────────
+local function ensureTree()
+	FS.ensureFolder(ROOT)
+	FS.ensureFolder(SONGS)
+	-- README для пользователя
+	if not FS.isFile(ROOT .. "/README.txt") then
+		FS.write(ROOT .. "/README.txt", table.concat({
+			"NOVA MUSIC — как добавить свои треки",
+			"=====================================",
+			"",
+			"1. Положите в папку Songs файл вида mytrack.json:",
+			"",
+			'   { "title": "Название", "artist": "Автор", "id": 123456789, "duration": 210 }',
+			"",
+			"   id — числовой ID аудио Roblox (rbxassetid). duration — длина в секундах (опционально).",
+			"",
+			"2. (Опционально) Синхронизированный текст для караоке:",
+			"",
+			'   "lyrics": [ { "t": 0.0, "line": "Первая строка" }, { "t": 12.5, "line": "Вторая строка" } ]',
+			"",
+			"   t — время начала строки в секундах. Слова внутри строки подсвечиваются",
+			"   автоматически по длительности строки. Без lyrics караоке сгенерирует демо-текст.",
+			"",
+			"3. Запустите плеер заново или нажмите кнопку обновления в интерфейсе.",
+			"   Файлы с именем, начинающимся на «_», игнорируются.",
+			"",
+		}, "\n"))
+	end
+	-- Шаблон нового трека (игнорируется сканером)
+	if not FS.isFile(SONGS .. "/_template.json") then
+		FS.write(SONGS .. "/_template.json", Nova.jsonEncode({
+			title = "Название трека",
+			artist = "Имя исполнителя",
+			id = 0, -- замените 0 на числовой ID аудио Roblox
+			duration = 210,
+			bpm = 120,
+			lyrics = {
+				{ t = 0.0,  line = "Пример строки с синхронизацией" },
+				{ t = 8.0,  line = "Вторая строка начнётся через 8 секунд" },
+			},
+		}, true))
+	end
+end
+
+--────────────────────────── Конфигурация ──────────────────────────
+local CONFIG_DEFAULTS = {
+	version   = 1,
+	volume    = 0.80,
+	muted     = false,
+	loop      = "off",   -- off | all | one
+	shuffle   = false,
+	speed     = 1.0,
+	karaoke   = true,
+	smartUI   = true,
+	intro     = true,
+	accent    = "aurora",
+	lastTrack = nil,     -- ключ трека
+	liked     = {},      -- массив ключей
+	effects   = { bass = false, vocal = false, treble = false, reverb = false, wide = false, nightcore = false, lofi = false },
+	pos       = nil,     -- {x, y} смещение окна
+}
+
+local Config = { data = U.deepCopy(CONFIG_DEFAULTS) }
+Nova.config = Config
+
+local saveIdle = U.idle(0.6, function()
+	local payload = Config.data
+	FS.write(ROOT .. "/config.json", Nova.jsonEncode(payload))
+end)
+
+function Config.load()
+	local raw = FS.read(ROOT .. "/config.json")
+	if raw then
+		local decoded = Nova.jsonDecode(raw)
+		if type(decoded) == "table" then
+			Config.data = U.deepMerge(CONFIG_DEFAULTS, decoded)
+		end
+	end
+	-- Санитизация
+	local d = Config.data
+	d.volume = U.clamp(tonumber(d.volume) or 0.8, 0, 1)
+	d.speed = U.clamp(tonumber(d.speed) or 1, 0.5, 1.5)
+	if d.loop ~= "off" and d.loop ~= "all" and d.loop ~= "one" then d.loop = "off" end
+	if type(d.liked) ~= "table" then d.liked = {} end
+	local accentOk = type(d.accent) == "string" and Nova.theme ~= nil and Nova.theme.accents[d.accent] ~= nil
+	if not accentOk then d.accent = "aurora" end
+	return d
+end
+
+function Config.save()
+	saveIdle()
+	bus.ConfigChanged:Fire(Config.data)
+end
+
+-- Немедленная запись на диск (первый запуск, критичные моменты)
+function Config.flush()
+	FS.write(ROOT .. "/config.json", Nova.jsonEncode(Config.data))
+	bus.ConfigChanged:Fire(Config.data)
+end
+
+function Config.set(key, value)
+	Config.data[key] = value
+	Config.save()
+end
+
+--────────────────────────── Библиотека треков ──────────────────────────
+local Lib = { tracks = {}, byKey = {}, MAX_TRACKS = 200 }
+Nova.library = Lib
+
+function Lib.likedKey(track)
+	if track.demo then return "demo:" .. track.title end
+	if track.id then return tostring(track.id) end
+	return "name:" .. track.title
+end
+
+function Lib.isLiked(track)
+	local k = Lib.likedKey(track)
+	for _, v in ipairs(Config.data.liked) do
+		if v == k then return true end
+	end
+	return false
+end
+
+function Lib.toggleLiked(track)
+	local k = Lib.likedKey(track)
+	local found = false
+	for i, v in ipairs(Config.data.liked) do
+		if v == k then table.remove(Config.data.liked, i) found = true break end
+	end
+	if not found then
+		table.insert(Config.data.liked, k)
+	end
+	Config.save()
+	return not found
+end
+
+function Lib.normalize(data, fileName)
+	if type(data) ~= "table" then return nil end
+	local title = tostring(data.title or data.name or fileName or "Без названия")
+	local artist = tostring(data.artist or data.author or "Неизвестный исполнитель")
+	local id = nil
+	if type(data.id) == "number" and data.id > 0 then
+		id = "rbxassetid://" .. tostring(data.id)
+	elseif type(data.id) == "string" and #data.id > 4 then
+		if data.id:match("^rbxasset") or data.id:match("^http") then
+			id = data.id
+		elseif tonumber(data.id) then
+			id = "rbxassetid://" .. data.id
+		end
+	end
+	local track = {
+		title    = title,
+		artist   = artist,
+		id       = id,
+		demo     = (not id) or (data.demo == true),
+		duration = U.clamp(tonumber(data.duration) or 200, 10, 3600),
+		bpm      = U.clamp(tonumber(data.bpm) or 104, 40, 220),
+		lyrics   = nil,
+		file     = fileName,
+		key      = nil,
+	}
+	if type(data.lyrics) == "table" and #data.lyrics > 0 then
+		local lines = {}
+		for _, l in ipairs(data.lyrics) do
+			if type(l) == "table" and type(l.line) == "string" then
+				lines[#lines + 1] = { t = tonumber(l.t) or 0, line = l.line }
+			end
+		end
+		table.sort(lines, function(a, b) return a.t < b.t end)
+		if #lines > 0 then track.lyrics = lines end
+	end
+	track.key = Lib.likedKey(track)
+	return track
+end
+
+-- Демо-записи: интерактивные «беззвучные» треки для знакомства с плеером.
+-- У них нет аудио ID: плеер честно проигрывает их в режиме симуляции
+-- (тайминг идёт по bpm, караоке работает полностью).
+local DEMO_SONGS = {
+	{
+		title = "Полночная Аврора", artist = "Nova Demo", demo = true,
+		duration = 214, bpm = 96,
+	},
+	{
+		title = "Неоновый Дождь", artist = "Nova Demo", demo = true,
+		duration = 196, bpm = 122,
+	},
+	{
+		title = "Гравитация Тишины", artist = "Nova Demo", demo = true,
+		duration = 248, bpm = 84,
+	},
+	{
+		title = "Синтетическое Сердце", artist = "Nova Demo", demo = true,
+		duration = 188, bpm = 128,
+	},
+}
+
+function Lib.writeDemoSongs()
+	for i, song in ipairs(DEMO_SONGS) do
+		local path = SONGS .. "/demo_" .. tostring(i) .. ".json"
+		if not FS.isFile(path) then
+			FS.write(path, Nova.jsonEncode(song))
+		end
+	end
+end
+
+function Lib.scan()
+	local files = FS.list(SONGS)
+	local tracks = {}
+	for _, path in ipairs(files) do
+		local name = path:match("[^/\\]+$") or path
+		local lower = name:lower()
+		if name:sub(1, 1) ~= "_" and (lower:match("%.json$") or lower:match("%.nova$")) then
+			local raw = FS.read(path)
+			local data = Nova.jsonDecode(raw)
+			local t = Lib.normalize(data, name:gsub("%.json$", ""):gsub("%.nova$", ""))
+			if t then
+				tracks[#tracks + 1] = t
+				if #tracks >= Lib.MAX_TRACKS then break end
+			end
+		end
+	end
+	-- Нет валидных треков → создаём демо-записи и пересканируем
+	if #tracks == 0 then
+		Lib.writeDemoSongs()
+		for _, path in ipairs(FS.list(SONGS)) do
+			local name = path:match("[^/\\]+$") or path
+			local lower = name:lower()
+			if name:sub(1, 1) ~= "_" and lower:match("%.json$") then
+				local data = Nova.jsonDecode(FS.read(path))
+				local t = Lib.normalize(data, name:gsub("%.json$", ""))
+				if t then tracks[#tracks + 1] = t end
+			end
+		end
+	end
+	table.sort(tracks, function(a, b)
+		if a.demo ~= b.demo then return not a.demo end -- реальные треки выше
+		return a.title:lower() < b.title:lower()
+	end)
+	for i, t in ipairs(tracks) do t.index = i end
+	Lib.tracks = tracks
+	Lib.byKey = {}
+	for _, t in ipairs(tracks) do Lib.byKey[t.key] = t end
+	bus.LibChanged:Fire(tracks)
+	return tracks
+end
+
+function Lib.findByKey(key)
+	return Lib.byKey[key]
+end
+
+function Lib.init()
+	ensureTree()
+	Config.load()
+	-- config.json появляется сразу при первом запуске
+	if not FS.isFile(ROOT .. "/config.json") then
+		Config.flush()
+	end
+	Lib.scan()
+end
+
+--══════════════════════════ Часть 4: NVG — векторный движок ══════════════════════════
+-- Nova Vector Graphics: программный растеризатор примитивов. Никаких эмодзи и
+-- готовых картинок — все иконки рисуются кадрами (Frame + UICorner + UIGradient):
+--   rect    — прямоугольник со скруглением
+--   circle  — круг (UICorner 1,0)
+--   line    — капсульная линия с поворотом
+--   ring    — дуга/кольцо из сегментов
+--   poly    — заливка полигона построчным сканлайном
+--   polyline/arrow — ломаные и стрелки
+-- Система координат иконок — расчётная сетка 24×24, масштабируется в любой px.
+
+local U = Nova.util
+local Theme = Nova.theme
+
+local NVG = {}
+Nova.nvg = NVG
+
+-- Переносимый atan2 (в Luau есть math.atan2, но не во всех Lua-окружениях)
+local function atan2(y, x)
+	if x > 0 then return math.atan(y / x) end
+	if x < 0 then
+		if y >= 0 then return math.atan(y / x) + math.pi end
+		return math.atan(y / x) - math.pi
+	end
+	if y > 0 then return math.pi / 2 end
+	if y < 0 then return -math.pi / 2 end
+	return 0
+end
+
+--────────────────────────── Перо (контекст рисования) ──────────────────────────
+local Pen = {}
+Pen.__index = Pen
+
+-- Создаёт контекст: координаты художника (design×design) масштабируются в pxSize
+function NVG.pen(host, pxSize, design)
+	local pen = setmetatable({
+		host = host,
+		s = pxSize / (design or 24),
+		color = Theme.colors.white,
+		alpha = 0,
+		bg = Theme.colors.bg,     -- цвет «прорезки» (knockout)
+		g1 = nil, g2 = nil, grot = 0,
+		count = 0,
+	}, Pen)
+	return pen
+end
+
+function Pen:st(opts)
+	if opts.color ~= nil then self.color = opts.color end
+	if opts.alpha ~= nil then self.alpha = opts.alpha end
+	if opts.bg ~= nil then self.bg = opts.bg end
+	if opts.grad ~= nil then
+		self.g1, self.g2, self.grot = opts.grad[1], opts.grad[2], opts.grad[3] or 90
+	elseif opts.grad == false then
+		self.g1, self.g2 = nil, nil
+	end
+	return self
+end
+
+local function applyStyle(frame, pen)
+	frame.BackgroundColor3 = pen.color
+	frame.BackgroundTransparency = pen.alpha
+	frame.BorderSizePixel = 0
+	frame.Parent = pen.host
+	pen.count = pen.count + 1
+	if pen.g1 then
+		local g = Instance.new("UIGradient")
+		g.Color = ColorSequence.new(pen.g1, pen.g2)
+		g.Rotation = pen.grot
+		g.Parent = frame
+	end
+	return frame
+end
+
+-- Прямоугольник: левый-верхний угол (x,y), размеры (w,h), скругление r
+function Pen:rect(x, y, w, h, r)
+	local f = Instance.new("Frame")
+	f.AnchorPoint = Vector2.new(0, 0)
+	f.Position = UDim2.fromOffset(x * self.s, y * self.s)
+	f.Size = UDim2.fromOffset(math.max(w * self.s, 1), math.max(h * self.s, 1))
+	applyStyle(f, self)
+	if r and r > 0 then
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, r * self.s)
+		c.Parent = f
+	end
+	return f
+end
+
+-- Круг: центр (cx,cy), диаметр d
+function Pen:circle(cx, cy, d)
+	local r = d * self.s / 2
+	local f = Instance.new("Frame")
+	f.AnchorPoint = Vector2.new(0.5, 0.5)
+	f.Position = UDim2.fromOffset(cx * self.s, cy * self.s)
+	f.Size = UDim2.fromOffset(math.max(r * 2, 1), math.max(r * 2, 1))
+	applyStyle(f, self)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(1, 0)
+	c.Parent = f
+	return f
+end
+
+-- Круг «прорезки» цветом фона (для отверстий в шестерёнке, точках слайдеров)
+function Pen:hole(cx, cy, d)
+	local saved = self.color
+	self.color = self.bg
+	self:circle(cx, cy, d)
+	self.color = saved
+end
+
+-- Прямоугольная прорезка цветом фона
+function Pen:knockRect(x, y, w, h, r)
+	local saved = self.color
+	self.color = self.bg
+	self:rect(x, y, w, h, r)
+	self.color = saved
+end
+
+-- Контурное сердце: заливка + прорезка меньшим сердцем
+function Pen:heartOutline(cx, cy, scale)
+	self:heart(cx, cy, scale)
+	local saved = self.color
+	self.color = self.bg
+	self:heart(cx, cy - 0.6, scale * 0.74)
+	self.color = saved
+end
+
+-- Линия: капсула между точками, толщина th
+function Pen:line(x1, y1, x2, y2, th)
+	local dx, dy = (x2 - x1) * self.s, (y2 - y1) * self.s
+	local len = math.sqrt(dx * dx + dy * dy)
+	local ang = math.deg(atan2(dy, dx))
+	local f = Instance.new("Frame")
+	f.AnchorPoint = Vector2.new(0.5, 0.5)
+	f.Position = UDim2.fromOffset((x1 + x2) / 2 * self.s, (y1 + y2) / 2 * self.s)
+	f.Size = UDim2.fromOffset(math.max(len, 1), math.max(th * self.s, 1))
+	f.Rotation = ang
+	applyStyle(f, self)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(1, 0)
+	c.Parent = f
+	return f
+end
+
+-- Ломаная: линия через точки
+function Pen:polyline(pts, th)
+	for i = 1, #pts - 1 do
+		self:line(pts[i][1], pts[i][2], pts[i + 1][1], pts[i + 1][2], th)
+	end
+end
+
+-- Стрелка: линия + шеврон-наконечник
+function Pen:arrow(x1, y1, x2, y2, th, headLen)
+	self:line(x1, y1, x2, y2, th)
+	local dx, dy = x2 - x1, y2 - y1
+	local len = math.sqrt(dx * dx + dy * dy)
+	if len < 0.01 then return end
+	local ux, uy = dx / len, dy / len
+	local hl = headLen or 4
+	-- два «пера» наконечника под 32° к направлению
+	local a1x = -ux * math.cos(math.rad(32)) - uy * math.sin(math.rad(32))
+	local a1y = -uy * math.cos(math.rad(32)) + ux * math.sin(math.rad(32))
+	local a2x = -ux * math.cos(math.rad(32)) + uy * math.sin(math.rad(32))
+	local a2y = -uy * math.cos(math.rad(32)) - ux * math.sin(math.rad(32))
+	self:line(x2, y2, x2 + a1x * hl, y2 + a1y * hl, th)
+	self:line(x2, y2, x2 + a2x * hl, y2 + a2y * hl, th)
+end
+
+-- Точка на окружности: угол в градусах, 0° = вправо, по часовой (экран, y вниз)
+local function onCircle(cx, cy, r, deg)
+	local a = math.rad(deg)
+	return cx + r * math.cos(a), cy + r * math.sin(a)
+end
+
+-- Дуга / кольцо: центр, диаметр, толщина, начальный угол, разворот
+function Pen:ring(cx, cy, d, th, a0, sweep)
+	local r = d * self.s / 2
+	sweep = sweep or 360
+	local n = U.clamp(math.ceil(math.abs(sweep) / 12), 3, 40)
+	local step = sweep / n
+	for i = 0, n - 1 do
+		local a1 = a0 + step * i
+		local a2 = a0 + step * (i + 1)
+		local x1, y1 = onCircle(cx, cy, r / self.s, a1)
+		local x2, y2 = onCircle(cx, cy, r / self.s, a2)
+		-- удлиняем хорды, чтобы сегменты смыкались без «зубцов»
+		local dx, dy = x2 - x1, y2 - y1
+		local l = math.sqrt(dx * dx + dy * dy)
+		if l > 0.001 then
+			local ex = dx / l * (th * 0.35)
+			local ey = dy / l * (th * 0.35)
+			self:line(x1 - ex, y1 - ey, x2 + ex, y2 + ey, th)
+		end
+	end
+end
+
+-- Заливка полигона: построчный сканлайн (кадр-полоса на каждую пересечённую строку)
+function Pen:poly(pts)
+	-- границы
+	local ymin, ymax = math.huge, -math.huge
+	for _, p in ipairs(pts) do
+		if p[2] < ymin then ymin = p[2] end
+		if p[2] > ymax then ymax = p[2] end
+	end
+	local step = 1 -- шаг сетки в единицах дизайн-пространства
+	local j = #pts
+	for y = ymin + step * 0.5, ymax, step do
+		local xs = {}
+		for i = 1, #pts do
+			local p1, p2 = pts[i], pts[j]
+			if (p1[2] <= y and p2[2] > y) or (p2[2] <= y and p1[2] > y) then
+				local t = (y - p1[2]) / (p2[2] - p1[2])
+				xs[#xs + 1] = p1[1] + t * (p2[1] - p1[1])
+			end
+			j = i
+		end
+		table.sort(xs)
+		for k = 1, #xs - 1, 2 do
+			local w = xs[k + 1] - xs[k]
+			if w > 0.05 then
+				self:rect(xs[k], y - step * 0.5, w, step, 0)
+			end
+		end
+	end
+end
+
+-- Сердце: параметрическая кривая, равномерно сэмплированная в полигон
+function Pen:heart(cx, cy, scale)
+	local pts = {}
+	local n = 30
+	for i = 0, n - 1 do
+		local t = math.pi * 2 * i / n
+		local x = 16 * math.sin(t) ^ 3
+		local y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+		pts[#pts + 1] = { cx + x * scale, cy - y * scale } -- y инвертирован (экран)
+	end
+	self:poly(pts)
+end
+
+-- Шестерёнка: полигон с зубьями + прорезка центра
+function Pen:gear(cx, cy, rOuter, rInner, teeth, holeD)
+	local pts = {}
+	local seg = 360 / teeth
+	for i = 0, teeth - 1 do
+		local a = i * seg
+		pts[#pts + 1] = { onCircle(cx, cy, rOuter, a + seg * 0.05) }
+		pts[#pts + 1] = { onCircle(cx, cy, rOuter, a + seg * 0.38) }
+		pts[#pts + 1] = { onCircle(cx, cy, rInner, a + seg * 0.50) }
+		pts[#pts + 1] = { onCircle(cx, cy, rInner, a + seg * 0.88) }
+	end
+	self:poly(pts)
+	if holeD and holeD > 0 then
+		self:hole(cx, cy, holeD)
+	end
+end
+
+-- Звезда (n лучей)
+function Pen:star(cx, cy, rOuter, rInner, rays, rot)
+	local pts = {}
+	for i = 0, rays * 2 - 1 do
+		local r = (i % 2 == 0) and rOuter or rInner
+		pts[#pts + 1] = { onCircle(cx, cy, r, rot + 360 * i / (rays * 2)) }
+	end
+	self:poly(pts)
+end
+
+-- Волна (синусоида точками → polyline)
+function Pen:wave(x0, x1, cy, amp, period, th)
+	local pts = {}
+	local n = 18
+	for i = 0, n do
+		local x = U.lerp(x0, x1, i / n)
+		local y = cy + math.sin((x / period) * math.pi * 2) * amp
+		pts[#pts + 1] = { x, y }
+	end
+	self:polyline(pts, th)
+end
+
+-- Сколько кадров создал пекарь (диагностика)
+function NVG.cost(pen)
+	return pen and pen.count or 0
+end
+
+--══════════════════════════ Часть 5: Библиотека иконок ══════════════════════════
+-- Каждая иконка — функция-художник на расчётной сетке 24×24.
+-- Никаких эмодзи, никаких чужих ассетов: только примитивы NVG.
+
+local NVG = Nova.nvg
+local Theme = Nova.theme
+local U = Nova.util
+
+local Icons = { painters = {} }
+Nova.icons = Icons
+
+local function reg(name, fn)
+	Icons.painters[name] = fn
+end
+
+-- Тангенциальный наконечник для дуг (стрелка по касательной)
+local function arcHead(pen, cx, cy, r, deg, th, hl)
+	local px, py = cx + r * math.cos(math.rad(deg)), cy + r * math.sin(math.rad(deg))
+	local ux, uy = -math.sin(math.rad(deg)), math.cos(math.rad(deg)) -- касательная (по часовой)
+	pen:arrow(px, py, px + ux * 1.1, py + uy * 1.1, th, hl or 4)
+end
+
+--────────────────── Транспорт ──────────────────
+reg("play", function(pen)
+	pen:poly({ { 8.4, 5.2 }, { 19, 12 }, { 8.4, 18.8 } })
+end)
+
+reg("pause", function(pen)
+	pen:rect(7.2, 6, 3.4, 12, 1.2)
+	pen:rect(13.4, 6, 3.4, 12, 1.2)
+end)
+
+reg("prev", function(pen)
+	pen:rect(6.2, 6, 2.6, 12, 1)
+	pen:poly({ { 17.8, 6 }, { 9.8, 12 }, { 17.8, 18 } })
+end)
+
+reg("next", function(pen)
+	pen:rect(15.2, 6, 2.6, 12, 1)
+	pen:poly({ { 6.2, 6 }, { 14.2, 12 }, { 6.2, 18 } })
+end)
+
+reg("shuffle", function(pen)
+	pen:arrow(4, 7.2, 8.2, 7.2, 2)
+	pen:arrow(8.2, 7.2, 16.6, 17, 2, 4.2)
+	pen:arrow(4, 16.8, 8.2, 16.8, 2)
+	pen:arrow(8.2, 16.8, 16.6, 7, 2, 4.2)
+end)
+
+reg("repeat", function(pen)
+	pen:ring(12, 12, 15.6, 2.1, -30, 300)
+	arcHead(pen, 12, 12, 7.8, 268, 2.1, 4.2)
+end)
+
+reg("repeatOne", function(pen)
+	pen:ring(12, 12, 15.6, 2.1, -30, 300)
+	arcHead(pen, 12, 12, 7.8, 268, 2.1, 4.2)
+	pen:rect(11.1, 9.4, 1.9, 5.4, 0.9)
+end)
+
+--────────────────── Звук и настройки ──────────────────
+reg("volume", function(pen)
+	pen:rect(4.4, 9.6, 3.4, 4.8, 1)
+	pen:poly({ { 8.3, 9.6 }, { 12.3, 6.1 }, { 12.3, 17.9 }, { 8.3, 14.4 } })
+	pen:ring(12.6, 12, 10.6, 1.9, -52, 104)
+	pen:ring(12.6, 12, 15.2, 1.9, -44, 88)
+end)
+
+reg("volumeMute", function(pen)
+	pen:rect(4.4, 9.6, 3.4, 4.8, 1)
+	pen:poly({ { 8.3, 9.6 }, { 12.3, 6.1 }, { 12.3, 17.9 }, { 8.3, 14.4 } })
+	pen:line(15.4, 9.7, 20.4, 14.3, 2)
+	pen:line(20.4, 9.7, 15.4, 14.3, 2)
+end)
+
+reg("search", function(pen)
+	pen:ring(10.6, 10.6, 11, 2.1, 0, 360)
+	pen:line(16.4, 16.4, 20.6, 20.6, 2.4)
+end)
+
+reg("gear", function(pen)
+	pen:gear(12, 12, 9.4, 7, 8, 6.4)
+end)
+
+reg("sliders", function(pen)
+	pen:line(4, 7, 20, 7, 1.9)
+	pen:line(4, 12, 20, 12, 1.9)
+	pen:line(4, 17, 20, 17, 1.9)
+	pen:circle(14.6, 7, 4.6)
+	pen:hole(14.6, 7, 1.9)
+	pen:circle(8.6, 12, 4.6)
+	pen:hole(8.6, 12, 1.9)
+	pen:circle(16.4, 17, 4.6)
+	pen:hole(16.4, 17, 1.9)
+end)
+
+reg("wave", function(pen)
+	pen:wave(4, 20, 12, 4.6, 7.4, 2.1)
+end)
+
+reg("dial", function(pen)
+	pen:ring(12, 12.6, 15, 2.1, 150, 240)
+	pen:line(12, 12.6, 16.6, 8, 2.3)
+	pen:circle(12, 12.6, 2.4)
+end)
+
+reg("power", function(pen)
+	pen:ring(12, 12.8, 15.4, 2.2, -55, 290)
+	pen:line(12, 4, 12, 11.4, 2.4)
+end)
+
+--────────────────── Навигация и контент ──────────────────
+reg("home", function(pen)
+	pen:poly({ { 12, 4.2 }, { 20.8, 11.2 }, { 18.4, 11.2 }, { 18.4, 19.8 }, { 5.6, 19.8 }, { 5.6, 11.2 }, { 3.2, 11.2 } })
+	pen:knockRect(10.3, 14.6, 3.4, 5.2, 1)
+end)
+
+reg("library", function(pen)
+	pen:rect(4.8, 6.2, 2.2, 11.8, 1)
+	pen:rect(9.4, 6.2, 2.2, 11.8, 1)
+	pen:poly({ { 14.8, 6.2 }, { 17, 6.2 }, { 19.2, 18 }, { 17, 18 } })
+end)
+
+reg("note", function(pen)
+	pen:circle(8.6, 17, 4.8)
+	pen:rect(10.8, 4.8, 1.9, 12.4, 0.9)
+	pen:poly({ { 12.7, 4.8 }, { 18.9, 6.6 }, { 12.7, 10.5 } })
+end)
+
+reg("folder", function(pen)
+	pen:poly({ { 3.8, 7.2 }, { 3.8, 18.2 }, { 20.2, 18.2 }, { 20.2, 9.4 }, { 11.4, 9.4 }, { 9.2, 7.2 } })
+end)
+
+reg("queue", function(pen)
+	pen:circle(5.4, 6.8, 2.3)
+	pen:circle(5.4, 12, 2.3)
+	pen:circle(5.4, 17.2, 2.3)
+	pen:line(9.4, 6.8, 19, 6.8, 2)
+	pen:line(9.4, 12, 19, 12, 2)
+	pen:line(9.4, 17.2, 19, 17.2, 2)
+end)
+
+reg("sparkle", function(pen)
+	pen:star(9.6, 10.6, 6.4, 2, 4, 0)
+	pen:star(17.4, 16.8, 3.5, 1.2, 4, 45)
+	pen:star(17.6, 6.2, 2.4, 0.9, 4, 20)
+end)
+
+reg("filter", function(pen)
+	pen:poly({ { 4.4, 5.2 }, { 19.6, 5.2 }, { 13.8, 12.2 }, { 13.8, 17.2 }, { 10.2, 19.6 }, { 10.2, 12.2 } })
+end)
+
+reg("keyboard", function(pen)
+	pen:polyline({ { 4.2, 7.4 }, { 19.8, 7.4 }, { 19.8, 16.6 }, { 4.2, 16.6 }, { 4.2, 7.4 } }, 1.8)
+	pen:circle(7.6, 10.6, 1.7)
+	pen:circle(10.4, 10.6, 1.7)
+	pen:circle(13.2, 10.6, 1.7)
+	pen:circle(16, 10.6, 1.7)
+	pen:rect(7.6, 13.4, 8.8, 1.6, 0.8)
+end)
+
+reg("clock", function(pen)
+	pen:ring(12, 12, 14.8, 2, 0, 360)
+	pen:line(12, 12, 12, 7.2, 1.9)
+	pen:line(12, 12, 15.6, 13.8, 1.9)
+end)
+
+reg("info", function(pen)
+	pen:ring(12, 12, 15.2, 2, 0, 360)
+	pen:rect(11.1, 10.4, 1.9, 6.8, 0.9)
+	pen:rect(11.1, 6.4, 1.9, 2.3, 0.9)
+end)
+
+reg("refresh", function(pen)
+	pen:ring(12, 12, 15, 2.2, 110, 300)
+	arcHead(pen, 12, 12, 7.5, 52, 2.2, 4.2)
+end)
+
+--────────────────── Действия ──────────────────
+reg("heartFill", function(pen)
+	pen:heart(12, 11.8, 0.64)
+end)
+
+reg("heartOutline", function(pen)
+	pen:heartOutline(12, 11.8, 0.64)
+end)
+
+reg("plus", function(pen)
+	pen:line(12, 5.4, 12, 18.6, 2.6)
+	pen:line(5.4, 12, 18.6, 12, 2.6)
+end)
+
+reg("close", function(pen)
+	pen:line(6.6, 6.6, 17.4, 17.4, 2.4)
+	pen:line(17.4, 6.6, 6.6, 17.4, 2.4)
+end)
+
+reg("check", function(pen)
+	pen:polyline({ { 5.6, 12.4 }, { 10, 16.8 }, { 18.6, 7.4 } }, 2.6)
+end)
+
+reg("minimize", function(pen)
+	pen:line(7, 17.2, 17, 17.2, 2.2)
+end)
+
+reg("chevronDown", function(pen)
+	pen:polyline({ { 7.2, 9.4 }, { 12, 14.2 }, { 16.8, 9.4 } }, 2.3)
+end)
+
+reg("chevronUp", function(pen)
+	pen:polyline({ { 7.2, 14.6 }, { 12, 9.8 }, { 16.8, 14.6 } }, 2.3)
+end)
+
+reg("chevronLeft", function(pen)
+	pen:polyline({ { 14.4, 7.2 }, { 9.6, 12 }, { 14.4, 16.8 } }, 2.3)
+end)
+
+reg("chevronRight", function(pen)
+	pen:polyline({ { 9.6, 7.2 }, { 14.4, 12 }, { 9.6, 16.8 } }, 2.3)
+end)
+
+reg("dotsV", function(pen)
+	pen:circle(12, 5.8, 2.5)
+	pen:circle(12, 12, 2.5)
+	pen:circle(12, 18.2, 2.5)
+end)
+
+--────────────────── Публичный рендер ──────────────────
+-- Рисует иконку name в host размером px. Возвращает pen (для диагностики).
+-- opts: color, alpha, bg, grad = {c1, c2, rot}, state (второй аргумент художника)
+function Icons.draw(host, px, name, opts)
+	opts = opts or {}
+	local fn = Icons.painters[name]
+	local pen = NVG.pen(host, px, 24)
+	pen:st({
+		color = opts.color or Theme.colors.text,
+		alpha = opts.alpha or 0,
+		bg = opts.bg or Theme.colors.bg,
+	})
+	if opts.grad then
+		pen:st({ grad = opts.grad })
+	end
+	if fn then
+		local ok, err = pcall(fn, pen, opts.state)
+		if not ok then
+			warn("[NovaMusic] Иконка «" .. tostring(name) .. "»: " .. tostring(err))
+		end
+	end
+	return pen
+end
+
+--══════════════════════════ Часть 6: UI-кит ══════════════════════════
+-- Фабрика элементов, микроанимации, Smart UI (самоскрытие служебных слоёв),
+-- кастомные скроллбары, слайдеры, тултипы и тосты.
+
+local TweenService = Nova.services.Tween
+local UIS = Nova.services.Input
+local U = Nova.util
+local Theme = Nova.theme
+local bus = Nova.bus
+local Icons = Nova.icons
+
+local Kit = {}
+Nova.kit = Kit
+
+--────────────────────────── Фабрика ──────────────────────────
+function Kit.new(className, props, parent)
+	local inst = Instance.new(className)
+	props = props or {}
+	for k, v in pairs(props) do
+		if k ~= "Parent" then
+			inst[k] = v
+		end
+	end
+	inst.Parent = parent or props.Parent
+	return inst
+end
+
+function Kit.corner(inst, r)
+	local c = Instance.new("UICorner")
+	if type(r) == "number" then
+		c.CornerRadius = UDim.new(0, r)
+	elseif r then
+		c.CornerRadius = r
+	else
+		c.CornerRadius = UDim.new(1, 0)
+	end
+	c.Parent = inst
+	return c
+end
+
+function Kit.stroke(inst, color, transparency, thickness)
+	local s = Instance.new("UIStroke")
+	s.Color = color or Color3.fromRGB(255, 255, 255)
+	s.Transparency = transparency or 0.88
+	s.Thickness = thickness or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = inst
+	return s
+end
+
+function Kit.pad(inst, l, t, r, b)
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft = UDim.new(0, l or 0)
+	p.PaddingTop = UDim.new(0, t or 0)
+	p.PaddingRight = UDim.new(0, r or 0)
+	p.PaddingBottom = UDim.new(0, b or 0)
+	p.Parent = inst
+	return p
+end
+
+function Kit.grad(inst, c1, c2, rot, transparency)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(c1, c2)
+	g.Rotation = rot or 90
+	if transparency then
+		g.Transparency = transparency
+	end
+	g.Parent = inst
+	return g
+end
+
+function Kit.list(inst, direction, padding, sortOrder)
+	local l = Instance.new("UIListLayout")
+	l.FillDirection = direction or Enum.FillDirection.Vertical
+	l.Padding = UDim.new(0, padding or 0)
+	l.SortOrder = Enum.SortOrder.LayoutOrder
+	if sortOrder then l.SortOrder = sortOrder end
+	l.Parent = inst
+	return l
+end
+
+function Kit.label(parent, props)
+	local defaults = {
+		BackgroundTransparency = 1,
+		Font = Theme.fonts.semi,
+		TextColor3 = Theme.colors.text,
+		TextSize = 14,
+		Text = "",
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	}
+	for k, v in pairs(props) do defaults[k] = v end
+	return Kit.new("TextLabel", defaults, parent)
+end
+
+--────────────────────────── Твин-хелпер ──────────────────────────
+function Kit.tween(inst, info, props)
+	local ti = type(info) == "number" and Theme.motion.base or info
+	local ok, tw = pcall(function() return TweenService:Create(inst, ti, props) end)
+	if ok then tw:Play() return tw end
+	return nil
+end
+
+--────────────────────────── Smart UI ──────────────────────────
+-- Служебные элементы (скроллбары, подсказки) исчезают при бездействии
+-- и возвращаются при наведении, вводе или смене трека.
+local Smart = { items = {}, enabled = true, hoverOwners = {} }
+Nova.smart = Smart
+
+local function fadeTargetsFor(obj)
+	local props = {}
+	local cls = obj.ClassName
+	if cls == "TextLabel" or cls == "TextButton" then
+		props.TextTransparency = obj.TextTransparency
+		props.BackgroundTransparency = obj.BackgroundTransparency
+	elseif cls == "ImageLabel" or cls == "ImageButton" then
+		props.ImageTransparency = obj.ImageTransparency
+		props.BackgroundTransparency = obj.BackgroundTransparency
+	else
+		props.BackgroundTransparency = obj.BackgroundTransparency
+	end
+	-- прилагательный UIStroke гасим вместе
+	local stroke = obj:FindFirstChildOfClass("UIStroke")
+	if stroke then props._stroke = stroke end
+	local pad = obj:FindFirstChildOfClass("UIPadding")
+	return props, stroke
+end
+
+function Smart.register(obj, opts)
+	opts = opts or {}
+	local baseProps, stroke = fadeTargetsFor(obj)
+	local item = {
+		obj = obj,
+		idle = opts.idle or 1.5,
+		shown = true,
+		token = 0,
+		base = baseProps,
+		stroke = stroke,
+		strokeT = stroke and stroke.Transparency or 1,
+	}
+	Smart.items[#Smart.items + 1] = item
+	if opts.owner then
+		Smart.bindOwner(item, opts.owner)
+	end
+	-- события, которые «будят» элемент
+	if opts.wake then
+		for _, sig in ipairs(opts.wake) do
+			U.trackConn(sig:Connect(function() Smart.pulse(item) end))
+		end
+	end
+	return item
+end
+
+function Smart.bindOwner(item, owner)
+	Smart.hoverOwners[owner] = Smart.hoverOwners[owner] or {}
+	table.insert(Smart.hoverOwners[owner], item)
+	U.trackConn(owner.MouseEnter:Connect(function() Smart.pulse(item) end))
+end
+
+function Smart.apply(item, shown)
+	local obj = item.obj
+	if shown then
+		Kit.tween(obj, Theme.motion.base, item.base)
+		if item.stroke then
+			Kit.tween(item.stroke, Theme.motion.base, { Transparency = item.strokeT })
+		end
+	else
+		local hideProps = {}
+		for k in pairs(item.base) do
+			if k ~= "_stroke" then hideProps[k] = 1 end
+		end
+		Kit.tween(obj, Theme.motion.slow, hideProps)
+		if item.stroke then
+			Kit.tween(item.stroke, Theme.motion.slow, { Transparency = 1 })
+		end
+	end
+end
+
+function Smart.pulse(item)
+	if not Smart.enabled then return end
+	item.token = item.token + 1
+	local my = item.token
+	if not item.shown then
+		item.shown = true
+		Smart.apply(item, true)
+	end
+	task.delay(item.idle, function()
+		if item.token == my and Smart.enabled then
+			item.shown = false
+			Smart.apply(item, false)
+		end
+	end)
+end
+
+-- «Разбудить» всё, привязанное к владельцу (например, список при смене трека)
+function Smart.pulseOwner(owner)
+	local arr = Smart.hoverOwners[owner]
+	if arr then
+		for _, item in ipairs(arr) do Smart.pulse(item) end
+	end
+end
+
+function Smart.setEnabled(on)
+	Smart.enabled = on
+	for _, item in ipairs(Smart.items) do
+		item.token = item.token + 1
+		item.shown = on
+		Smart.apply(item, on)
+	end
+end
+
+--────────────────────────── Кнопки ──────────────────────────
+-- Иконка рисуется NVG внутрь держателя; перерисовка — только при смене состояния.
+function Kit.iconButton(parent, opts)
+	opts = opts or {}
+	local btn = Kit.new("TextButton", {
+		Name = "Btn_" .. tostring(opts.name or "btn"),
+		AutoButtonColor = false,
+		Text = "",
+		BackgroundColor3 = opts.bg or Theme.colors.surface,
+		BackgroundTransparency = opts.bgTrans or 0,
+		Size = opts.size or UDim2.fromOffset(36, 36),
+		Position = opts.pos or UDim2.new(),
+		AnchorPoint = opts.anchor or Vector2.new(0, 0),
+		Parent = parent,
+	}, parent)
+	Kit.corner(btn, opts.radius or Theme.radius.sm)
+	local stroke
+	if opts.stroke ~= false then
+		stroke = Kit.stroke(btn, Theme.colors.white, 0.92, 1)
+	end
+	local holder = Kit.new("Frame", {
+		Name = "IconHolder",
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(opts.iconSize or 18, opts.iconSize or 18),
+		Parent = btn,
+	})
+	local scaler = Kit.new("UIScale", { Parent = holder })
+	local state = { icon = opts.icon, opts = opts }
+
+	local function drawIcon()
+		for _, ch in ipairs(holder:GetChildren()) do
+			if not ch:IsA("UIScale") then ch:Destroy() end
+		end
+		if state.icon then
+			Icons.draw(holder, holder.Size.X.Offset, state.icon, {
+				color = opts.iconColor or Theme.colors.text,
+				alpha = opts.iconAlpha or 0,
+				bg = opts.bg or Theme.colors.surface,
+				grad = opts.iconGrad,
+				state = state,
+			})
+		end
+	end
+
+	-- Roblox запрещает кастомные поля в Instances — держим связку
+	-- «кнопка → установщик иконки» во внешнем реестре на слабых ключах
+	Kit._iconSetter = Kit._iconSetter or setmetatable({}, { __mode = "k" })
+	Kit._ctrl = Kit._ctrl or setmetatable({}, { __mode = "k" })
+
+	local function setIcon(name, iconOpts)
+		state.icon = name
+		if iconOpts then
+			for k, v in pairs(iconOpts) do opts[k] = v end
+		end
+		drawIcon()
+	end
+	Kit._iconSetter[btn] = setIcon
+	Kit._ctrl[btn] = { holder = holder, scaler = scaler, opts = opts }
+	drawIcon()
+
+	-- Ховер: подсветка + мягкий pop иконки
+	local hoverBg = opts.hoverBg or Theme.colors.surfaceHi
+	btn.MouseEnter:Connect(function()
+		Kit.tween(btn, Theme.motion.fast, { BackgroundColor3 = hoverBg })
+		Kit.tween(scaler, Theme.motion.pop, { Scale = opts.hoverScale or 1.08 })
+		if opts.onHover then opts.onHover(true) end
+	end)
+	btn.MouseLeave:Connect(function()
+		Kit.tween(btn, Theme.motion.base, { BackgroundColor3 = opts.bg or Theme.colors.surface })
+		Kit.tween(scaler, Theme.motion.base, { Scale = 1 })
+		if opts.onHover then opts.onHover(false) end
+	end)
+	btn.MouseButton1Down:Connect(function()
+		Kit.tween(scaler, Theme.motion.instant, { Scale = (opts.hoverScale or 1.08) * 0.88 })
+	end)
+	btn.MouseButton1Up:Connect(function()
+		Kit.tween(scaler, Theme.motion.spring, { Scale = opts.hoverScale or 1.08 })
+	end)
+	if opts.onClick then
+		btn.Activated:Connect(function()
+			opts.onClick(btn)
+		end)
+	end
+	return btn
+end
+
+-- Публичный доступ: смена иконки кнопки и её UIScale без кастомных полей
+function Kit.setIcon(btn, name, iconOpts)
+	local set = Kit._iconSetter and Kit._iconSetter[btn]
+	if set then set(name, iconOpts) end
+end
+
+function Kit.scalerOf(btn)
+	local c = Kit._ctrl and Kit._ctrl[btn]
+	return c and c.scaler
+end
+
+--────────────────────────── Кастомный скроллбар ──────────────────────────
+-- Присоединяется к ScrollingFrame (ScrollBarThickness = 0), рисует свой бегунок,
+-- поддерживает перетаскивание и регистрацию в Smart UI.
+function Kit.scrollbar(scroll, parentTo, opts)
+	opts = opts or {}
+	local width = opts.width or 4
+	local track = Kit.new("Frame", {
+		Name = "ScrollTrack",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, math.max(width + 10, 14), 1, 0),
+		Position = UDim2.new(1, -(width + 10) - (opts.offset or 2), 0, 4),
+		AnchorPoint = Vector2.new(0, 0),
+		Parent = parentTo,
+	}, parentTo)
+	local thumb = Kit.new("Frame", {
+		Name = "ScrollThumb",
+		BackgroundColor3 = opts.color or Theme.colors.textFaint,
+		BackgroundTransparency = 0.35,
+		Size = UDim2.new(1, 0, 0, 40),
+		Position = UDim2.new(0, 2, 0, 0),
+		Parent = track,
+	}, track)
+	Kit.corner(thumb, math.floor(width / 2) + 1)
+
+	local dragging = false
+	local dragStartMouse, dragStartPos = 0, 0
+
+	local function metrics()
+		local view = scroll.AbsoluteWindowSize.Y
+		local content = scroll.AbsoluteCanvasSize.Y
+		local trackH = track.AbsoluteSize.Y - 8
+		local maxScroll = math.max(content - view, 1)
+		local ratio = U.clamp(view / math.max(content, 1), 0.08, 1)
+		local thumbH = math.max(trackH * ratio, 30)
+		return view, content, trackH, maxScroll, ratio, thumbH
+	end
+
+	local function sync()
+		if not scroll.Parent then return end
+		local view, content, trackH, maxScroll, ratio, thumbH = metrics()
+		local canvasPos = scroll.CanvasPosition.Y
+		thumb.Size = UDim2.new(1, -4, 0, thumbH)
+		local t = U.clamp(canvasPos / maxScroll, 0, 1)
+		thumb.Position = UDim2.new(0, 2, 0, 4 + t * (trackH - thumbH))
+	end
+
+	thumb.MouseEnter:Connect(sync)
+	scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(sync)
+	U.trackConn(bus.LibChanged:Connect(function()
+		task.defer(sync)
+	end))
+	track:GetPropertyChangedSignal("AbsoluteSize"):Connect(sync)
+	task.defer(sync)
+
+	-- Перетаскивание бегунка
+	thumb.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			dragStartMouse = UIS:GetMouseLocation().Y
+			dragStartPos = scroll.CanvasPosition.Y
+			local view, content, trackH, maxScroll, ratio, thumbH = metrics()
+			local moveConn
+			moveConn = UIS.InputChanged:Connect(function(m)
+				if m.UserInputType == Enum.UserInputType.MouseMovement and dragging then
+					local dy = UIS:GetMouseLocation().Y - dragStartMouse
+					local k = maxScroll / math.max(trackH - thumbH, 1)
+					scroll.CanvasPosition = Vector2.new(0, U.clamp(dragStartPos + dy * k, 0, maxScroll))
+				end
+			end)
+			UIS.InputEnded:Connect(function(m)
+				if m.UserInputType == Enum.UserInputType.MouseButton1 then
+					dragging = false
+					if moveConn then moveConn:Disconnect() end
+				end
+			end)
+		end
+	end)
+
+	-- Клик по дорожке: прыжок
+	track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and not dragging then
+			local view, content, trackH, maxScroll, ratio, thumbH = metrics()
+			local my = UIS:GetMouseLocation().Y
+			local top = track.AbsolutePosition.Y
+			local t = U.clamp((my - top - 4) / math.max(trackH, 1), 0, 1)
+			Kit.tween(scroll, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				CanvasPosition = Vector2.new(0, t * maxScroll)
+			})
+		end
+	end)
+
+	-- Smart UI: бегунок сам скрывается
+	local item = Smart.register(thumb, { idle = 1.4, owner = opts.owner or scroll })
+	-- широкая невидимая зона наведения у края
+	local hit = Kit.new("Frame", {
+		Name = "ScrollHit",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 16, 1, 0),
+		Position = UDim2.new(1, -18, 0, 0),
+		Parent = parentTo,
+	}, parentTo)
+	U.trackConn(hit.MouseEnter:Connect(function() Smart.pulse(item) end))
+	Smart.pulse(item)
+	task.delay(2.2, function()
+		if item.shown then Smart.pulse(item) end -- через пару секунд сам уйдёт
+		item.token = item.token + 1
+		local my = item.token
+		task.delay(item.idle, function()
+			if item.token == my and Smart.enabled and not dragging then
+				item.shown = false
+				Smart.apply(item, false)
+			end
+		end)
+	end)
+
+	return { item = item, sync = sync, thumb = thumb, track = track }
+end
+
+--────────────────────────── Слайдер ──────────────────────────
+-- value 0..1; поддерживает колесо мыши, перетаскивание, внешний sync.
+function Kit.slider(parent, opts)
+	opts = opts or {}
+	local barH = opts.barH or 5
+	local root = Kit.new("Frame", {
+		Name = "Slider",
+		BackgroundTransparency = 1,
+		Size = opts.size or UDim2.new(1, 0, 0, 18),
+		Parent = parent,
+	}, parent)
+	local hit = Kit.new("TextButton", {
+		Name = "Hit",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		Parent = root,
+	}, root)
+	local track = Kit.new("Frame", {
+		Name = "Track",
+		BackgroundColor3 = opts.trackColor or Theme.colors.surfaceHi,
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0, barH),
+		Parent = root,
+	}, root)
+	Kit.corner(track, barH / 2)
+	-- Заполнение: маска-контейнер с клипом
+	local fillHolder = Kit.new("Frame", {
+		Name = "FillHolder",
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(opts.value or 0, 0, 1, 0),
+		Parent = track,
+	}, track)
+	local fill = Kit.new("Frame", {
+		Name = "Fill",
+		BackgroundColor3 = Theme.accent.flat,
+		Size = UDim2.fromScale(1, 1),
+		Parent = fillHolder,
+	}, fillHolder)
+	Kit.corner(fill, barH / 2)
+
+	local knob = Kit.new("Frame", {
+		Name = "Knob",
+		BackgroundColor3 = Theme.colors.white,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(opts.value or 0, 0, 0.5, 0),
+		Size = UDim2.fromOffset(0, 0),
+		Parent = root,
+	}, root)
+	Kit.corner(knob, 999)
+	Kit.stroke(knob, Theme.colors.white, 0.7, 1)
+	local knobScaler = Kit.new("UIScale", { Parent = knob })
+
+	local value = U.clamp(opts.value or 0, 0, 1)
+	local dragging = false
+
+	local function apply(v, animate)
+		value = U.clamp(v, 0, 1)
+		local info = animate and Theme.motion.fast or Theme.motion.instant
+		Kit.tween(fillHolder, info, { Size = UDim2.new(value, 0, 1, 0) })
+		Kit.tween(knob, info, { Position = UDim2.new(value, 0, 0.5, 0) })
+	end
+
+	local function fromX()
+		local abs = hit.AbsoluteSize.X
+		if abs <= 0 then return value end
+		local mx = UIS:GetMouseLocation().X
+		local rel = (mx - hit.AbsolutePosition.X) / abs
+		return U.clamp(rel, 0, 1)
+	end
+
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			knob.Size = UDim2.fromOffset(13, 13)
+			apply(fromX())
+			if opts.onChange then opts.onChange(value, true) end
+		end
+	end)
+	U.trackConn(UIS.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
+			dragging = false
+			knob.Size = UDim2.fromOffset(0, 0)
+			if opts.onChange then opts.onChange(value, false) end
+		end
+	end))
+	U.trackConn(UIS.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			apply(fromX())
+			if opts.onChange then opts.onChange(value, true) end
+		end
+	end))
+	if opts.wheel ~= false then
+		hit.MouseEnter:Connect(function()
+			Kit.tween(knobScaler, Theme.motion.fast, { Scale = 1 })
+			knob.Size = UDim2.fromOffset(11, 11)
+		end)
+		hit.MouseLeave:Connect(function()
+			if not dragging then knob.Size = UDim2.fromOffset(0, 0) end
+		end)
+		hit.InputChanged:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseWheel then
+				local step = opts.wheelStep or 0.05
+				apply(value + (input.Position.Z > 0 and step or -step))
+				if opts.onChange then opts.onChange(value, false) end
+			end
+		end)
+	end
+
+	apply(value)
+	return {
+		root = root,
+		get = function() return value end,
+		isDragging = function() return dragging end,
+		set = function(v, animate) apply(v, animate) end,
+		fill = fill,
+	}
+end
+
+--────────────────────────── Тултипы ──────────────────────────
+local tooltipState = { layer = nil, label = nil, token = 0 }
+
+function Kit.mountTooltip(layer)
+	tooltipState.layer = layer
+	tooltipState.label = Kit.label(layer, {
+		Name = "NovaTooltip",
+		BackgroundColor3 = Theme.colors.surfaceHi,
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 1),
+		Size = UDim2.fromOffset(10, 26),
+		Font = Theme.fonts.semi,
+		TextSize = 12,
+		TextColor3 = Theme.colors.text,
+		ZIndex = 500,
+		Visible = false,
+	})
+	Kit.corner(tooltipState.label, 7)
+	Kit.stroke(tooltipState.label, Theme.colors.white, 0.9, 1)
+end
+
+function Kit.bindTooltip(btn, text)
+	btn.MouseEnter:Connect(function()
+		if not tooltipState.label then return end
+		tooltipState.token = tooltipState.token + 1
+		local my = tooltipState.token
+		task.delay(0.45, function()
+			if tooltipState.token ~= my then return end
+			local lbl = tooltipState.label
+			lbl.Text = text
+			-- ширина по тексту
+			local ts = game:GetService("TextService")
+			local ok, size = pcall(function()
+				return ts:GetTextSize(text, 12, lbl.Font, Vector2.new(1000, 100))
+			end)
+			local w = (ok and size.X or 60) + 20
+			lbl.Size = UDim2.fromOffset(w, 26)
+			local abs = btn.AbsolutePosition
+			lbl.Position = UDim2.fromOffset(abs.X + btn.AbsoluteSize.X / 2, abs.Y - 8)
+			lbl.Visible = true
+			lbl.TextTransparency = 1
+			lbl.BackgroundTransparency = 1
+			Kit.tween(lbl, Theme.motion.fast, { TextTransparency = 0, BackgroundTransparency = 0.06 })
+		end)
+	end)
+	btn.MouseLeave:Connect(function()
+		tooltipState.token = tooltipState.token + 1
+		if tooltipState.label and tooltipState.label.Visible then
+			local lbl = tooltipState.label
+			Kit.tween(lbl, Theme.motion.fast, { TextTransparency = 1, BackgroundTransparency = 1 })
+			task.delay(0.2, function()
+				if lbl.TextTransparency >= 1 then lbl.Visible = false end
+			end)
+		end
+	end)
+end
+
+--────────────────────────── Тосты ──────────────────────────
+function Kit.mountToasts(container)
+	local icons = { ok = "check", warn = "info", err = "close", info = "sparkle" }
+	U.trackConn(bus.Toast:Connect(function(text, kind)
+		kind = kind or "info"
+		local card = Kit.new("Frame", {
+			Name = "Toast",
+			BackgroundColor3 = Theme.colors.surface,
+			BackgroundTransparency = 0.04,
+			Size = UDim2.fromOffset(240, 44),
+			Position = UDim2.new(1, 20, 0, 0),
+			AnchorPoint = Vector2.new(1, 0),
+			Parent = container,
+		})
+		Kit.corner(card, 12)
+		Kit.stroke(card, Theme.colors.white, 0.9, 1)
+		local accentDot = Kit.new("Frame", {
+			BackgroundColor3 = kind == "err" and Theme.colors.danger or (kind == "ok" and Theme.colors.ok or Theme.accent.flat),
+			Size = UDim2.fromOffset(4, 22),
+			Position = UDim2.new(0, 12, 0.5, 0),
+			AnchorPoint = Vector2.new(0, 0.5),
+			Parent = card,
+		})
+		Kit.corner(accentDot, 2)
+		local iconHolder = Kit.new("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromOffset(18, 18),
+			Position = UDim2.new(0, 26, 0.5, 0),
+			AnchorPoint = Vector2.new(0, 0.5),
+			Parent = card,
+		})
+		Icons.draw(iconHolder, 18, icons[kind] or "info", {
+			color = kind == "err" and Theme.colors.danger or (kind == "ok" and Theme.colors.ok or Theme.accent.flat),
+			bg = Theme.colors.surface,
+		})
+		Kit.label(card, {
+			Position = UDim2.new(0, 52, 0, 0),
+			Size = UDim2.new(1, -62, 1, 0),
+			Text = tostring(text),
+			TextSize = 13,
+			TextColor3 = Theme.colors.text,
+		})
+		-- появление
+		Kit.tween(card, Theme.motion.spring, { Position = UDim2.new(1, -8, 0, 0) })
+		task.delay(3.2, function()
+			if card.Parent then
+				Kit.tween(card, Theme.motion.base, { Position = UDim2.new(1, 20, 0, 0), BackgroundTransparency = 1 })
+				task.delay(0.35, function() card:Destroy() end)
+			end
+		end)
+	end))
+end
+
+-- Обрезка текста с «…» по фактической ширине
+function Kit.fitText(label, maxPx)
+	local ts = game:GetService("TextService")
+	local ok, size = pcall(function()
+		return ts:GetTextSize(label.Text, label.TextSize, label.Font, Vector2.new(10000, 1000))
+	end)
+	if not ok then return end
+	if size.X <= maxPx then return end
+	local t = label.Text
+	while #t > 1 do
+		t = t:sub(1, -2)
+		local ok2, s2 = pcall(function()
+			return ts:GetTextSize(t .. "…", label.TextSize, label.Font, Vector2.new(10000, 1000))
+		end)
+		if ok2 and s2.X <= maxPx then
+			label.Text = t .. "…"
+			return
+		end
+	end
+	label.Text = "…"
+end
+
+--══════════════════════════ Часть 7: Аудио-движок и обложки ══════════════════════════
+-- Воспроизведение (реальное и «симуляция» для демо), фильтры, loop/shuffle,
+-- плюс генератор детерминированных векторных обложек по хешу трека.
+
+local U = Nova.util
+local bus = Nova.bus
+local Theme = Nova.theme
+local RunService = Nova.services.Run
+local SoundService = Nova.services.Sound
+local ContentProvider = Nova.services.Content
+
+--────────────────────────── Обложки ──────────────────────────
+local Covers = { palettes = {} }
+Nova.covers = Covers
+
+Covers.palettes = {
+	{ bg = Color3.fromRGB(24, 20, 40), a = Color3.fromRGB(122, 92, 255),  b = Color3.fromRGB(88, 200, 255) },
+	{ bg = Color3.fromRGB(34, 18, 26), a = Color3.fromRGB(255, 110, 150), b = Color3.fromRGB(255, 176, 92) },
+	{ bg = Color3.fromRGB(14, 28, 28), a = Color3.fromRGB(78, 220, 178),  b = Color3.fromRGB(150, 255, 205) },
+	{ bg = Color3.fromRGB(30, 24, 14), a = Color3.fromRGB(242, 202, 92),  b = Color3.fromRGB(255, 122, 84) },
+	{ bg = Color3.fromRGB(16, 18, 34), a = Color3.fromRGB(104, 122, 255), b = Color3.fromRGB(235, 240, 255) },
+	{ bg = Color3.fromRGB(26, 14, 32), a = Color3.fromRGB(205, 84, 255),  b = Color3.fromRGB(92, 142, 255) },
+}
+
+-- Детерминированная обложка: один и тот же трек всегда выглядит одинаково
+function Covers.make(parent, size, track)
+	local seed = U.hash(track and track.key or "nova")
+	local rng = U.seededRandom(seed)
+	local pal = Covers.palettes[(seed % #Covers.palettes) + 1]
+	local motif = seed % 3
+
+	local card = Nova.kit.new("Frame", {
+		Name = "Cover",
+		BackgroundColor3 = pal.bg,
+		BorderSizePixel = 0,
+		Size = UDim2.fromOffset(size, size),
+		ClipsDescendants = true,
+		Parent = parent,
+	}, parent)
+	Nova.kit.corner(card, math.floor(size * 0.16))
+	-- мягкая вертикальная глубина
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(150, 150, 175))
+	g.Rotation = 115
+	g.Parent = card
+
+	local pen = Nova.nvg.pen(card, size, 24)
+	pen.s = size / 24
+	pen.color = pal.a
+	pen.alpha = 0
+
+	if motif == 0 then
+		-- «Орбиты»: смещённый градиентный диск + кольца + спутник
+		local cx, cy = 9 + rng() * 4, 10 + rng() * 4
+		pen.color = pal.a
+		pen:circle(cx, cy, 15 + rng() * 3)
+		pen.color = pal.b
+		pen.alpha = 0.55
+		pen:ring(12, 12, 20, 1.4, 0, 360)
+		pen:ring(12, 12, 25.5, 1.1, 40, 220)
+		pen.alpha = 0
+		pen:circle(19.4, 5.8, 3.4)
+	elseif motif == 1 then
+		-- «Волны»: три синусоиды с разной амплитудой
+		pen.color = pal.a
+		pen:wave(2, 22, 9 + rng() * 2, 3.4, 7 + rng() * 3, 1.7)
+		pen.color = pal.b
+		pen:wave(2, 22, 14 + rng() * 2, 2.4, 5 + rng() * 3, 1.4)
+		pen.alpha = 0.5
+		pen:wave(2, 22, 17.5, 1.6, 9, 1.1)
+		pen.alpha = 0
+		pen:circle(20, 5.6, 2.8)
+	else
+		-- «Пики»: треугольник, штрих-бары и точка
+		pen.color = pal.b
+		pen:poly({ { 4, 18.5 }, { 11.5, 5.5 }, { 19, 18.5 } })
+		pen.color = pal.a
+		pen.alpha = 0.75
+		pen:rect(5.4, 13.5, 1.6, 5, 0.8)
+		pen:rect(8.4, 15.5, 1.6, 3, 0.8)
+		pen:rect(14, 15.5, 1.6, 3, 0.8)
+		pen:rect(17, 13.5, 1.6, 5, 0.8)
+		pen.alpha = 0
+		pen:circle(12, 21.2, 2.4)
+	end
+	return card
+end
+
+--────────────────────────── Аудио-движок ──────────────────────────
+local Audio = {
+	state = {
+		track = nil, index = 0,
+		playing = false, time = 0, duration = 0,
+	},
+	sound = nil,
+	effects = {},
+	simConn = nil,
+	pollAcc = 0,
+	broken = {},
+}
+Nova.audio = Audio
+
+function Audio.applyVolume()
+	if Audio.sound then
+		Audio.sound.Volume = Nova.config.data.muted and 0 or Nova.config.data.volume
+	end
+	bus.VolumeChanged:Fire(Nova.config.data.volume, Nova.config.data.muted)
+end
+
+-- Цепочка эффектов: единый эквалайзер + отдельные инстансы
+function Audio.buildEffects()
+	local d = Nova.config.data.effects
+	-- Эквалайзер: один инстанс, гейнсы складываются
+	local low = d.bass and 8 or 0
+	local mid = d.vocal and 5 or 0
+	local high = d.treble and 5 or 0
+	if Audio.eq then
+		Audio.eq.Enabled = (low + mid + high) > 0
+		Audio.eq.GainLow = low
+		Audio.eq.GainMid = mid
+		Audio.eq.GainHigh = high
+	end
+	if Audio.reverb then Audio.reverb.Enabled = d.reverb end
+	if Audio.wide then Audio.wide.Enabled = d.wide end
+	if Audio.pitch then Audio.pitch.Enabled = d.nightcore end
+	if Audio.lofi then Audio.lofi.Enabled = d.lofi end
+	bus.EffectChanged:Fire(d)
+end
+
+function Audio.mountEffects(sound)
+	-- чистим старые
+	for _, key in ipairs({ "eq", "reverb", "wide", "pitch", "lofi" }) do
+		if Audio[key] then Audio[key]:Destroy() Audio[key] = nil end
+	end
+	Audio.eq = Instance.new("EqualizerSoundEffect")
+	Audio.eq.Name = "NovaEQ"
+	Audio.eq.Enabled = false
+	Audio.eq.Parent = sound
+	Audio.reverb = Instance.new("ReverbSoundEffect")
+	Audio.reverb.DecayTime = 1.8
+	Audio.reverb.WetLevel = 0.32
+	Audio.reverb.DryLevel = 0.8
+	Audio.reverb.Enabled = false
+	Audio.reverb.Parent = sound
+	Audio.wide = Instance.new("ChorusSoundEffect")
+	Audio.wide.Depth = 0.55
+	Audio.wide.Rate = 0.7
+	Audio.wide.Mix = 0.35
+	Audio.wide.Enabled = false
+	Audio.wide.Parent = sound
+	Audio.pitch = Instance.new("PitchShiftSoundEffect")
+	Audio.pitch.Octave = 1.25 -- 1.0 у PitchShift — отсутствие сдвига
+	Audio.pitch.Enabled = false
+	Audio.pitch.Parent = sound
+	Audio.lofi = Instance.new("DistortionSoundEffect")
+	Audio.lofi.Level = 0.65
+	Audio.lofi.Enabled = false
+	Audio.lofi.Parent = sound
+	Audio.buildEffects()
+end
+
+function Audio.setEffect(name, on)
+	local d = Nova.config.data.effects
+	if d[name] == nil then return end
+	d[name] = on and true or false
+	Nova.config.save()
+	Audio.buildEffects()
+end
+
+local function stopSim()
+	if Audio.simConn then
+		Audio.simConn:Disconnect()
+		Audio.simConn = nil
+	end
+end
+
+local function startSim()
+	stopSim()
+	Audio.simConn = RunService.Heartbeat:Connect(function(dt)
+		local st = Audio.state
+		if not st.playing then return end
+		st.time = st.time + dt * (Nova.config.data.speed or 1)
+		if st.time >= st.duration then
+			Audio.onTrackEnd()
+		else
+			Audio.pollAcc = Audio.pollAcc + dt
+			if Audio.pollAcc >= 0.1 then
+				Audio.pollAcc = 0
+				bus.TimeUpdated:Fire(st.time, st.duration)
+			end
+		end
+	end)
+end
+
+function Audio.onTrackEnd()
+	local d = Nova.config.data
+	local st = Audio.state
+	if d.loop == "one" then
+		Audio.seekTo(0)
+		Audio.resume()
+		return
+	end
+	Audio.next(false)
+end
+
+-- Полная загрузка трека в движок
+function Audio.loadTrack(track, index, autoPlay)
+	local st = Audio.state
+	st.track = track
+	st.index = index or track.index or 0
+	st.duration = track.duration or 200
+	st.time = 0
+	stopSim()
+	if Audio.sound then
+		Audio.sound:Stop()
+		Audio.sound:Destroy()
+		Audio.sound = nil
+	end
+	if track.demo then
+		-- Симуляция: демо-треки идут «в такт» без аудио ассета
+		startSim()
+		st.playing = autoPlay ~= false
+	else
+		local sound = Instance.new("Sound")
+		sound.Name = "NovaTrack"
+		sound.SoundId = track.id
+		sound.Volume = Nova.config.data.muted and 0 or Nova.config.data.volume
+		sound.PlaybackSpeed = Nova.config.data.speed or 1
+		sound.Parent = SoundService
+		Audio.sound = sound
+		Audio.mountEffects(sound)
+		Audio.applyVolume()
+		-- предзагрузка + контроль ошибок
+		task.spawn(function()
+			local ok = pcall(function()
+				ContentProvider:PreloadAsync({ sound })
+			end)
+			if not ok then return end
+			if sound.IsLoaded and sound.TimeLength > 0 then
+				st.duration = sound.TimeLength
+				track.duration = sound.TimeLength
+			end
+		end)
+		sound.Ended:Connect(function()
+			if Audio.sound == sound then
+				Audio.onTrackEnd()
+			end
+		end)
+		st.playing = autoPlay ~= false
+		if st.playing then
+			sound:Play()
+		end
+	end
+	Nova.config.data.lastTrack = track.key
+	Nova.config.save()
+	bus.TrackChanged:Fire(track, st.index)
+	bus.StateChanged:Fire(st.playing)
+	bus.TimeUpdated:Fire(0, st.duration)
+end
+
+function Audio.playTrack(track)
+	local st = Audio.state
+	if st.track and st.track.key == track.key then
+		Audio.toggle()
+		return
+	end
+	local idx = track.index or 1
+	Audio.loadTrack(track, idx, true)
+end
+
+function Audio.resume()
+	local st = Audio.state
+	if not st.track then return end
+	st.playing = true
+	if st.track.demo then
+		startSim()
+	else
+		if Audio.sound then
+			-- после естественного конца трека надёжнее Play, чем Resume
+			if st.time >= st.duration - 0.05 or st.time <= 0.01 then
+				pcall(function() Audio.sound.TimePosition = math.max(st.time, 0) end)
+				pcall(function() Audio.sound:Play() end)
+			else
+				pcall(function() Audio.sound:Resume() end)
+			end
+		end
+	end
+	bus.StateChanged:Fire(true)
+end
+
+function Audio.pause()
+	local st = Audio.state
+	st.playing = false
+	if Audio.sound then Audio.sound:Pause() end
+	-- симуляция просто замирает (simConn остаётся, dt не копится)
+	bus.StateChanged:Fire(false)
+end
+
+function Audio.toggle()
+	if Audio.state.playing then
+		Audio.pause()
+	else
+		Audio.resume()
+	end
+end
+
+function Audio.seekTo(t)
+	local st = Audio.state
+	st.time = U.clamp(t, 0, st.duration)
+	if Audio.sound and st.track and not st.track.demo then
+		pcall(function() Audio.sound.TimePosition = st.time end)
+	end
+	bus.TimeUpdated:Fire(st.time, st.duration)
+end
+
+function Audio.next(user)
+	local st = Audio.state
+	local tracks = Nova.library.tracks
+	if #tracks == 0 then return end
+	local idx = st.index
+	if Nova.config.data.shuffle and #tracks > 1 then
+		local pick = idx
+		while pick == idx do
+			pick = math.random(1, #tracks)
+		end
+		idx = pick
+	else
+		idx = idx + 1
+		if idx > #tracks then
+			if Nova.config.data.loop == "all" then
+				idx = 1
+			else
+				idx = #tracks
+				Audio.loadTrack(tracks[idx], idx, false)
+				Audio.pause()
+				return
+			end
+		end
+	end
+	Audio.loadTrack(tracks[idx], idx, true)
+end
+
+function Audio.prev()
+	local st = Audio.state
+	local tracks = Nova.library.tracks
+	if #tracks == 0 then return end
+	-- Если прошло больше 4 секунд — сначала «в начало»
+	if st.time > 4 then
+		Audio.seekTo(0)
+		return
+	end
+	local idx = st.index - 1
+	if idx < 1 then
+		idx = (Nova.config.data.loop == "all") and #tracks or 1
+	end
+	Audio.loadTrack(tracks[idx], idx, true)
+end
+
+function Audio.setVolume(v)
+	Nova.config.data.volume = U.clamp(v, 0, 1)
+	if Nova.config.data.volume > 0 then Nova.config.data.muted = false end
+	Nova.config.save()
+	Audio.applyVolume()
+end
+
+function Audio.toggleMute()
+	Nova.config.data.muted = not Nova.config.data.muted
+	Nova.config.save()
+	Audio.applyVolume()
+end
+
+function Audio.cycleLoop()
+	local order = { off = "all", all = "one", one = "off" }
+	Nova.config.data.loop = order[Nova.config.data.loop] or "off"
+	Nova.config.save()
+	bus.LoopChanged:Fire(Nova.config.data.loop)
+end
+
+function Audio.toggleShuffle()
+	Nova.config.data.shuffle = not Nova.config.data.shuffle
+	Nova.config.save()
+	bus.ShuffleChanged:Fire(Nova.config.data.shuffle)
+end
+
+function Audio.setSpeed(s)
+	Nova.config.data.speed = U.clamp(s, 0.5, 1.5)
+	Nova.config.save()
+	if Audio.sound then
+		Audio.sound.PlaybackSpeed = Nova.config.data.speed
+	end
+end
+
+function Audio.refreshLibrary()
+	Nova.library.scan()
+	if Audio.state.track then
+		-- пересинхронизируем ссылку на текущий трек (мог обновиться)
+		local fresh = Nova.library.findByKey(Audio.state.track.key)
+		if fresh then
+			Audio.state.track = fresh
+			Audio.state.index = fresh.index or Audio.state.index
+		end
+	end
+	bus.Toast:Fire("Библиотека обновлена: " .. tostring(#Nova.library.tracks) .. " трек(ов)", "ok")
+end
+
+-- Тик синхронизации времени для реальных звуков
+U.trackConn(RunService.Heartbeat:Connect(function(dt)
+	local st = Audio.state
+	if st.playing and Audio.sound and st.track and not st.track.demo then
+		Audio.pollAcc = Audio.pollAcc + dt
+		if Audio.pollAcc >= 0.1 then
+			Audio.pollAcc = 0
+			local ok, pos = pcall(function() return Audio.sound.TimePosition end)
+			if ok and pos then st.time = pos end
+			local okL, len = pcall(function() return Audio.sound.TimeLength end)
+			if okL and len and len > 0 then
+				st.duration = len
+				if st.track.duration ~= len then
+					st.track.duration = len
+				end
+			end
+			bus.TimeUpdated:Fire(st.time, st.duration)
+		end
+	end
+end))
+
+--══════════════════════════ Часть 8: Караоке-движок ══════════════════════════
+-- Лирика берётся из JSON трека; если её нет — детерминированно генерируется
+-- по сиду трека и bpm (демо-режим). Движок считает индекс строки и слова
+-- и рассылает события bus.KaraokeLine / bus.KaraokeWord для UI.
+
+local U = Nova.util
+local bus = Nova.bus
+
+local Lyrics = {}
+Nova.lyrics = Lyrics
+
+--────────────────────────── Генератор демо-лирики ──────────────────────────
+local BANK_ADJ = { "неоновый", "полночный", "тихий", "стеклянный", "зимний", "электрический", "бархатный", "хрустальный", "ветреный", "синий", "последний", "новый", "бесконечный", "прохладный", "далёкий" }
+local BANK_NOUN = { "рассвет", "город", "пульс", "дождь", "маяк", "ветер", "силуэт", "горизонт", "трамвай", "эфир", "кадр", "маршрут", "прибой", "океан", "фонарь", "сигнал", "пейзаж", "закат", "отпечаток", "полёт" }
+local BANK_VERB = { "плывёт", "звенит", "дышит", "молчит", "исчезает", "находит", "помнит", "ждёт", "летит", "горит", "догоняет", "растворяется", "остаётся", "просыпается" }
+local BANK_VERB_WE = { "плывём", "летим", "молчим", "ждём", "горим", "дышим", "идём", "исчезаем", "просыпаемся", "помним" }
+local BANK_CONN = { "и", "в", "на", "сквозь", "за", "между", "без", "около", "перед" }
+
+local PATTERNS = {
+	function(r, bank) return bank.adj .. " " .. bank.noun .. " " .. bank.verb end,
+	function(r, bank) return "Мы " .. bank.verbWe .. " " .. bank.conn .. " " .. bank.adj .. " " .. bank.noun end,
+	function(r, bank) return bank.noun .. " " .. bank.verb .. " " .. bank.conn .. " " .. bank.noun2 end,
+	function(r, bank) return "Это " .. bank.adj .. " " .. bank.noun .. ", " .. bank.conn .. " " .. bank.noun2 end,
+	function(r, bank) return "Не " .. bank.verbWe .. " — " .. bank.noun .. " " .. bank.verb end,
+	function(r, bank) return bank.conn .. " " .. bank.adj .. " " .. bank.noun .. " " .. bank.verbWe .. " свет" end,
+	function(r, bank) return bank.noun .. ", " .. bank.noun2 .. " и " .. bank.noun3 end,
+	function(r, bank) return "Только " .. bank.adj .. " " .. bank.noun .. " " .. bank.verb end,
+}
+
+-- Первая буква заглавная только для ASCII (безопасно для UTF-8)
+local function capFirst(s)
+	local b = s:byte(1)
+	if b and b >= 97 and b <= 122 then
+		return string.char(b - 32) .. s:sub(2)
+	end
+	return s
+end
+
+-- Строит таблицу банка слов из генератора
+local function makeBank(rng)
+	local function pickInt(arr) return math.floor(rng(1, #arr + 0.999)) end
+	return {
+		adj = BANK_ADJ[pickInt(BANK_ADJ)],
+		noun = BANK_NOUN[pickInt(BANK_NOUN)],
+		noun2 = BANK_NOUN[pickInt(BANK_NOUN)],
+		noun3 = BANK_NOUN[pickInt(BANK_NOUN)],
+		verb = BANK_VERB[pickInt(BANK_VERB)],
+		verbWe = BANK_VERB_WE[pickInt(BANK_VERB_WE)],
+		conn = BANK_CONN[pickInt(BANK_CONN)],
+	}
+end
+
+-- Публичный провайдер: массив строк {t, dur, text, words}
+function Lyrics.get(track)
+	if track.lyrics and #track.lyrics > 0 then
+		local out = {}
+		for i, l in ipairs(track.lyrics) do
+			local nextT = track.lyrics[i + 1] and track.lyrics[i + 1].t or (l.t + 6)
+			local words = {}
+			for w in l.line:gmatch("%S+") do
+				words[#words + 1] = w
+			end
+			out[#out + 1] = {
+				t = l.t,
+				dur = math.max(nextT - l.t, 0.8),
+				text = l.line,
+				words = words,
+			}
+		end
+		return out
+	end
+	-- Процедурная лирика для демо: стабильна для конкретного трека
+	local seed = U.hash(track.key or track.title)
+	local rng = U.seededRandom(seed)
+	local beat = 60 / (track.bpm or 104)
+	local lineDur = math.max(beat * 8, 2.2) -- 2 такта
+	local count = math.max(math.floor((track.duration or 200) / lineDur), 6)
+	local out = {}
+	for i = 1, count do
+		local bank = makeBank(rng)
+		local patIdx = math.floor(rng(1, #PATTERNS + 0.999))
+		local text = PATTERNS[patIdx](rng, bank)
+		text = capFirst(text:sub(1, 1)) .. text:sub(2)
+		local words = {}
+		for w in text:gmatch("%S+") do
+			words[#words + 1] = w
+		end
+		local t = (i - 1) * lineDur
+		-- Каждая 4-я строка — «инструментальный» перерыв
+		if i % 4 == 0 then
+			out[#out + 1] = { t = t, dur = lineDur, text = "· · ·", words = { "·", "·", "·" }, instrumental = true }
+		else
+			out[#out + 1] = { t = t, dur = lineDur, text = text, words = words }
+		end
+	end
+	return out
+end
+
+-- Набор случайных слов для эффекта «вылетающих слов» при смене трека
+function Lyrics.burstWords(track, n)
+	local words = {}
+	if track and track.lyrics then
+		for _, l in ipairs(track.lyrics) do
+			for w in l.line:gmatch("%S+") do
+				local clean = w:gsub("[%p]", "")
+				if #clean > 2 then words[#words + 1] = clean end
+			end
+		end
+	end
+	if #words < n then
+		for _ = 1, n do
+			local r = U.hash(tostring(math.random()) .. tostring(os.clock()))
+			words[#words + 1] = BANK_NOUN[r % #BANK_NOUN + 1]
+		end
+	end
+	local out = {}
+	local used = {}
+	local guard = 0
+	while #out < math.min(n, #words) and guard < 60 do
+		guard = guard + 1
+		local idx = math.random(1, #words)
+		if not used[idx] then
+			used[idx] = true
+			out[#out + 1] = words[idx]
+		end
+	end
+	return out
+end
+
+--────────────────────────── Караоке-состояние ──────────────────────────
+local Kara = {
+	timeline = {},
+	lineIndex = 0,
+	wordIndex = 0,
+	enabled = true,
+	track = nil,
+}
+Nova.karaoke = Kara
+
+function Kara.setTrack(track)
+	Kara.track = track
+	Kara.lineIndex = 0
+	Kara.wordIndex = 0
+	Kara.timeline = track and Lyrics.get(track) or {}
+	bus.KaraokeLine:Fire(nil, 0)
+end
+
+-- Вес слова: длина + пробел (длинные слова «поются» дольше)
+local function lineWeights(line)
+	local weights, total = {}, 0
+	for i, w in ipairs(line.words) do
+		local wt = U.clamp(#w, 1, 14) + 1
+		weights[i] = wt
+		total = total + wt
+	end
+	return weights, total
+end
+
+function Kara.update(time)
+	if not Kara.enabled or #Kara.timeline == 0 then return end
+	-- поиск строки (с продвижением кэша)
+	local idx = U.clamp(Kara.lineIndex, 0, #Kara.timeline)
+	while idx < #Kara.timeline and Kara.timeline[idx + 1].t <= time do
+		idx = idx + 1
+	end
+	-- откат, если время отмотали назад
+	while idx > 0 and Kara.timeline[idx].t > time do
+		idx = idx - 1
+	end
+	if idx ~= Kara.lineIndex then
+		Kara.lineIndex = idx
+		Kara.wordIndex = 0
+		if idx == 0 then
+			bus.KaraokeLine:Fire(nil, 0)
+		else
+			bus.KaraokeLine:Fire(Kara.timeline[idx], idx)
+		end
+	end
+	-- индекс слова внутри строки: слово активно с момента своего НАЧАЛА
+	local line = Kara.timeline[idx]
+	if line and not line.instrumental and time >= line.t then
+		local weights, total = lineWeights(line)
+		local frac = U.clamp((time - line.t) / math.max(line.dur, 0.1), 0, 1)
+		local acc = 0
+		local wi = 0
+		for i, w in ipairs(weights) do
+			if frac >= acc - 0.0001 then
+				wi = i
+				acc = acc + w / total
+			else
+				break
+			end
+		end
+		if wi ~= Kara.wordIndex then
+			Kara.wordIndex = wi
+			bus.KaraokeWord:Fire(wi)
+		end
+	end
+end
+
+function Kara.currentLine()
+	return Kara.timeline[Kara.lineIndex], Kara.wordIndex
+end
+
+-- Держим карает в такте: подписка на время
+U.trackConn(bus.TimeUpdated:Connect(function(t)
+	Kara.update(t)
+end))
+U.trackConn(bus.TrackChanged:Connect(function(track)
+	Kara.setTrack(track)
+end))
+
+--══════════════════════════ Часть 9: Каркас интерфейса ══════════════════════════
+-- Экран, главное окно, сайдбар, хедер, плейлист, плеер-бар. Всё построено
+-- на фабрике Kit, иконки — NVG, анимации — Theme.motion.
+
+local U = Nova.util
+local bus = Nova.bus
+local Theme = Nova.theme
+local Kit = Nova.kit
+local Icons = Nova.icons
+local Audio = Nova.audio
+local Covers = Nova.covers
+local TweenService = Nova.services.Tween
+local UIS = Nova.services.Input
+local RunService = Nova.services.Run
+
+local UI = {
+	rows = {},          -- [index] = {frame, track, ...}
+	view = "all",       -- all | liked
+	query = "",
+	accentMarks = {},   -- { {obj, kind, extra} } для перекраски при смене акцента
+	karaokeOn = true,
+	eqConn = nil,
+}
+Nova.ui = UI
+
+function UI.markAccent(obj, kind)
+	UI.accentMarks[#UI.accentMarks + 1] = { obj = obj, kind = kind }
+	return obj
+end
+
+function UI.applyAccent()
+	for _, m in ipairs(UI.accentMarks) do
+		if m.obj.Parent then
+			if m.kind == "bg" then
+				m.obj.BackgroundColor3 = Theme.accent.flat
+			elseif m.kind == "text" then
+				m.obj.TextColor3 = Theme.accent.flat
+			elseif m.kind == "fill" then
+				m.obj.BackgroundColor3 = Theme.accent.flat
+			elseif m.kind == "stroke" then
+				m.obj.Color = Theme.accent.flat
+			elseif m.kind == "grad" then
+				local g = m.obj:FindFirstChildOfClass("UIGradient")
+				if g then
+					g.Color = ColorSequence.new(Theme.accent.c1, Theme.accent.c2)
+				end
+			end
+		end
+	end
+	-- перекрасить активную строку и кнопки-состояния
+	UI.updateRowStates()
+end
+
+U.trackConn(bus.LoopChanged:Connect(function() UI.refreshTransportIcons() end))
+U.trackConn(bus.ShuffleChanged:Connect(function() UI.refreshTransportIcons() end))
+
+--────────────────────────── Экран ──────────────────────────
+local function mountScreen()
+	local screen
+	local candidates = {}
+	local okHui, hui = pcall(function()
+		if type(gethui) == "function" then return gethui() end
+		return nil
+	end)
+	if okHui and hui then candidates[#candidates + 1] = hui end
+	candidates[#candidates + 1] = game:GetService("CoreGui")
+	local pg = Nova.services.Player and Nova.services.Player:FindFirstChildOfClass("PlayerGui")
+	if pg then candidates[#candidates + 1] = pg end
+	candidates[#candidates + 1] = game
+
+	for _, holder in ipairs(candidates) do
+		local ok = pcall(function()
+			local s = Instance.new("ScreenGui")
+			s.Name = "NovaMusicUI"
+			s.ResetOnSpawn = false
+			s.IgnoreGuiInset = true
+			s.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+			s.DisplayOrder = 9999
+			s.Parent = holder
+			screen = s
+		end)
+		if ok and screen then break end
+	end
+	if not screen then
+		error("[NovaMusic] Не удалось смонтировать ScreenGui")
+	end
+	UI.screen = screen
+	U.trackInstance(screen)
+	return screen
+end
+
+--────────────────────────── Окно ──────────────────────────
+local function buildRoot()
+	local root = Kit.new("Frame", {
+		Name = "NovaRoot",
+		BackgroundColor3 = Theme.colors.bg,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		Size = UDim2.fromOffset(Theme.window.size.X, Theme.window.size.Y),
+		BorderSizePixel = 0,
+		Visible = false,
+	}, UI.screen)
+	Kit.corner(root, Theme.radius.xl)
+	local stroke = Kit.stroke(root, Theme.colors.white, 0.9, 1)
+	-- внешнее «свечение»-рамка (перекрашивается вместе с акцентом)
+	local glow = Kit.new("Frame", {
+		Name = "Glow",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 12, 1, 12),
+		Position = UDim2.new(0, -6, 0, -6),
+		Parent = root,
+	}, root)
+	UI.markAccent(Kit.stroke(glow, Theme.accent.flat, 0.94, 2), "stroke")
+
+	-- фоновый градиент глубины
+	local bgGrad = Kit.new("Frame", {
+		Name = "BgGrad",
+		BackgroundColor3 = Theme.colors.bg,
+		Size = UDim2.fromScale(1, 1),
+		BorderSizePixel = 0,
+		Parent = root,
+	}, root)
+	Kit.grad(bgGrad, Color3.fromRGB(21, 21, 32), Color3.fromRGB(9, 9, 13), 115)
+	Kit.corner(bgGrad, Theme.radius.xl)
+
+	UI.root = root
+	UI.rootStroke = stroke
+
+	local pos = Nova.config.data.pos
+	if type(pos) == "table" and type(pos[1]) == "number" then
+		root.Position = UDim2.new(0.5, pos[1], 0.5, pos[2])
+	end
+
+	-- Перетаскивание окна за хедер (реализуем после сборки хедера)
+	return root
+end
+
+--────────────────────────── Сайдбар ──────────────────────────
+local function buildSidebar()
+	local sb = Kit.new("Frame", {
+		Name = "Sidebar",
+		BackgroundColor3 = Theme.colors.bgSoft,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, Theme.layers.sidebarW, 1, -Theme.layers.playerH),
+		Parent = UI.root,
+	}, UI.root)
+	Kit.corner(sb, Theme.radius.xl)
+
+	-- Логотип: векторный знак (кольцо + нота) и имя
+	local logo = Kit.new("Frame", {
+		Name = "Logo",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -28, 0, 64),
+		Position = UDim2.new(0, 16, 0, 14),
+		Parent = sb,
+	}, sb)
+	local mark = Kit.new("Frame", {
+		Name = "Mark",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(34, 34),
+		Position = UDim2.new(0, 2, 0.5, 0),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Parent = logo,
+	}, logo)
+	local mp = Nova.nvg.pen(mark, 34, 24)
+	mp.color = Theme.accent.flat
+	mp:ring(12, 12, 19, 2.4, -60, 280)
+	mp.color = Theme.accent.c2
+	mp:circle(12, 13.5, 8)
+	mp.color = Theme.colors.bgSoft
+	mp:circle(12, 13.5, 3.2)
+
+	Kit.label(logo, {
+		Name = "Brand",
+		Position = UDim2.new(0, 46, 0, 10),
+		Size = UDim2.new(1, -50, 0, 24),
+		Text = "NOVA",
+		Font = Theme.fonts.black,
+		TextSize = 22,
+	})
+	Kit.label(logo, {
+		Name = "BrandSub",
+		Position = UDim2.new(0, 46, 0, 32),
+		Size = UDim2.new(1, -50, 0, 14),
+		Text = "MUSIC PLAYER",
+		Font = Theme.fonts.semi,
+		TextSize = 10,
+		TextColor3 = Theme.colors.textDim,
+	})
+
+	-- Навигация: представления
+	local nav = Kit.new("Frame", {
+		Name = "Nav",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -24, 0, 96),
+		Position = UDim2.new(0, 12, 0, 92),
+		Parent = sb,
+	}, sb)
+	Kit.list(nav, Enum.FillDirection.Vertical, 6)
+
+	local function navBtn(name, icon, text, order, onClick)
+		local b = Kit.new("TextButton", {
+			Name = "Nav_" .. name,
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundColor3 = Theme.colors.surface,
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0, 42),
+			LayoutOrder = order,
+			Parent = nav,
+		}, nav)
+		Kit.corner(b, Theme.radius.md)
+		local iconHolder = Kit.new("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromOffset(20, 20),
+			Position = UDim2.new(0, 14, 0.5, 0),
+			AnchorPoint = Vector2.new(0, 0.5),
+			Parent = b,
+		}, b)
+		Icons.draw(iconHolder, 20, icon, { color = Theme.colors.textDim, bg = Theme.colors.bgSoft })
+		local lbl = Kit.label(b, {
+			Position = UDim2.new(0, 46, 0, 0),
+			Size = UDim2.new(1, -56, 1, 0),
+			Text = text,
+			TextColor3 = Theme.colors.textDim,
+			TextSize = 14,
+			Font = Theme.fonts.bold,
+		})
+		local bar = Kit.new("Frame", {
+			Name = "ActiveBar",
+			BackgroundColor3 = Theme.accent.flat,
+			Size = UDim2.new(0, 3, 0, 18),
+			Position = UDim2.new(0, 0, 0.5, 0),
+			AnchorPoint = Vector2.new(0, 0.5),
+			BackgroundTransparency = 1,
+			Parent = b,
+		}, b)
+		Kit.corner(bar, 2)
+		UI.markAccent(bar, "bg")
+		b.MouseEnter:Connect(function()
+			Kit.tween(b, Theme.motion.fast, { BackgroundTransparency = 0.4 })
+		end)
+		b.MouseLeave:Connect(function()
+			if UI.view ~= name then
+				Kit.tween(b, Theme.motion.base, { BackgroundTransparency = 1 })
+			end
+		end)
+		if onClick then b.Activated:Connect(onClick) end
+		return { btn = b, icon = iconHolder, label = lbl, bar = bar }
+	end
+
+	UI.navAll = navBtn("all", "note", "Все треки", 1, function() UI.setView("all") end)
+	UI.navLiked = navBtn("liked", "heartOutline", "Избранное", 2, function() UI.setView("liked") end)
+
+	-- Хиро-карточка «Nova Mix» — перемешать всё
+	local hero = Kit.new("TextButton", {
+		Name = "HeroMix",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.accent.flat,
+		Size = UDim2.new(1, -24, 0, 84),
+		Position = UDim2.new(0, 12, 0, 200),
+		Parent = sb,
+	}, sb)
+	Kit.corner(hero, Theme.radius.lg)
+	Kit.grad(hero, Theme.accent.c1, Theme.accent.c2, 35)
+	UI.markAccent(hero, "grad")
+	local heroIcon = Kit.new("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(30, 30),
+		Position = UDim2.new(0, 16, 0, 14),
+		Parent = hero,
+	}, hero)
+	Icons.draw(heroIcon, 30, "shuffle", { color = Theme.colors.black, bg = Theme.accent.flat })
+	Kit.label(hero, {
+		Position = UDim2.new(0, 16, 0, 46),
+		Size = UDim2.new(1, -30, 0, 18),
+		Text = "Nova Mix",
+		Font = Theme.fonts.black,
+		TextSize = 16,
+		TextColor3 = Theme.colors.black,
+	})
+	Kit.label(hero, {
+		Position = UDim2.new(0, 16, 0, 63),
+		Size = UDim2.new(1, -30, 0, 14),
+		Text = "Случайный порядок",
+		Font = Theme.fonts.semi,
+		TextSize = 11,
+		TextColor3 = Color3.fromRGB(24, 24, 34),
+	})
+	hero.MouseEnter:Connect(function()
+		Kit.tween(hero, Theme.motion.fast, { Size = UDim2.new(1, -20, 0, 88), Position = UDim2.new(0, 10, 0, 198) })
+	end)
+	hero.MouseLeave:Connect(function()
+		Kit.tween(hero, Theme.motion.base, { Size = UDim2.new(1, -24, 0, 84), Position = UDim2.new(0, 12, 0, 200) })
+	end)
+	hero.Activated:Connect(function()
+		if #Nova.library.tracks == 0 then return end
+		Nova.config.data.shuffle = true
+		bus.ShuffleChanged:Fire(true)
+		local pick = math.random(1, #Nova.library.tracks)
+		Audio.loadTrack(Nova.library.tracks[pick], pick, true)
+	end)
+
+	-- Статистика библиотеки
+	local stats = Kit.new("Frame", {
+		Name = "Stats",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -24, 0, 64),
+		Position = UDim2.new(0, 12, 0, 300),
+		Parent = sb,
+	}, sb)
+	Kit.label(stats, {
+		Text = "БИБЛИОТЕКА",
+		Font = Theme.fonts.bold,
+		TextSize = 10,
+		TextColor3 = Theme.colors.textFaint,
+		Position = UDim2.new(0, 4, 0, 0),
+		Size = UDim2.new(1, -8, 0, 14),
+	})
+	local countLbl = Kit.label(stats, {
+		Position = UDim2.new(0, 4, 0, 18),
+		Size = UDim2.new(1, -8, 0, 18),
+		Text = "0 треков",
+		Font = Theme.fonts.bold,
+		TextSize = 14,
+	})
+	UI.countLabel = countLbl
+	local likedCount = Kit.label(stats, {
+		Position = UDim2.new(0, 4, 0, 38),
+		Size = UDim2.new(1, -8, 0, 14),
+		Text = "0 в избранном",
+		Font = Theme.fonts.semi,
+		TextSize = 11,
+		TextColor3 = Theme.colors.textDim,
+	})
+	UI.likedLabel = likedCount
+
+	-- Футер сайдбара
+	Kit.label(sb, {
+		Name = "Footer",
+		Position = UDim2.new(0, 16, 1, -34),
+		Size = UDim2.new(1, -32, 0, 20),
+		Text = Nova.executor .. " · v" .. Nova.version,
+		Font = Theme.fonts.mono,
+		TextSize = 10,
+		TextColor3 = Theme.colors.textFaint,
+	})
+	local dot = Kit.new("Frame", {
+		Name = "StatusDot",
+		BackgroundColor3 = Theme.colors.ok,
+		Size = UDim2.fromOffset(6, 6),
+		Position = UDim2.new(1, -22, 1, -28),
+		Parent = sb,
+	}, sb)
+	Kit.corner(dot, 3)
+	UI.sidebar = sb
+end
+
+--────────────────────────── Хедер ──────────────────────────
+local function buildHeader()
+	local header = Kit.new("Frame", {
+		Name = "Header",
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, Theme.layers.sidebarW, 0, 0),
+		Size = UDim2.new(1, -Theme.layers.sidebarW, 0, Theme.layers.headerH),
+		Parent = UI.root,
+	}, UI.root)
+
+	-- Зона перетаскивания окна: создаётся первой (нижний слой),
+	-- кнопки и поиск перекрывают её в своих местах
+	local dragZone = Kit.new("TextButton", {
+		Name = "DragZone",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 0, 0, 0),
+		Size = UDim2.new(1, -Theme.layers.sidebarW, 1, 0),
+		Parent = header,
+	}, header)
+	Kit.makeDraggable(dragZone, UI.root)
+	UI.dragZone = dragZone
+
+	-- заголовок представления
+	local title = Kit.label(header, {
+		Name = "Title",
+		Position = UDim2.new(0, 22, 0, 12),
+		Size = UDim2.new(0, 260, 0, 22),
+		Text = "Твоя музыка",
+		Font = Theme.fonts.black,
+		TextSize = 19,
+	})
+	UI.viewTitle = title
+	local sub = Kit.label(header, {
+		Name = "Sub",
+		Position = UDim2.new(0, 22, 0, 36),
+		Size = UDim2.new(0, 300, 0, 14),
+		Text = "",
+		Font = Theme.fonts.semi,
+		TextSize = 11,
+		TextColor3 = Theme.colors.textDim,
+	})
+	UI.viewSub = sub
+
+	-- Поиск
+	local search = Kit.new("Frame", {
+		Name = "Search",
+		BackgroundColor3 = Theme.colors.surface,
+		Size = UDim2.new(0, 230, 0, 36),
+		Position = UDim2.new(1, -438, 0.5, 0),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Parent = header,
+	}, header)
+	Kit.corner(search, Theme.radius.pill)
+	Kit.stroke(search, Theme.colors.white, 0.93, 1)
+	local sIcon = Kit.new("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(16, 16),
+		Position = UDim2.new(0, 14, 0.5, 0),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Parent = search,
+	}, search)
+	Icons.draw(sIcon, 16, "search", { color = Theme.colors.textDim, bg = Theme.colors.surface })
+	local box = Kit.new("TextBox", {
+		Name = "Query",
+		BackgroundTransparency = 1,
+		Text = "",
+		PlaceholderText = "Поиск трека или исполнителя",
+		PlaceholderColor3 = Theme.colors.textFaint,
+		Font = Theme.fonts.semi,
+		TextSize = 13,
+		TextColor3 = Theme.colors.text,
+		ClearTextOnFocus = false,
+		Position = UDim2.new(0, 38, 0, 0),
+		Size = UDim2.new(1, -66, 1, 0),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = search,
+	}, search)
+	UI.searchBox = box
+	UI.searchFrame = search
+	local clearBtn = Kit.iconButton(search, {
+		name = "clear", icon = "close", size = UDim2.fromOffset(22, 22),
+		pos = UDim2.new(1, -28, 0.5, 0), anchor = Vector2.new(0, 0.5),
+		bg = Theme.colors.surface, hoverBg = Theme.colors.surfaceHi,
+		iconSize = 12, iconColor = Theme.colors.textDim, radius = Theme.radius.pill,
+		bgTrans = 1, stroke = false,
+		onClick = function()
+			box.Text = ""
+			UI.setQuery("")
+		end,
+	})
+	clearBtn.Visible = false
+	UI.searchClear = clearBtn
+	local applyQuery = U.idle(0.22, function(q) UI.setQuery(q) end)
+	box:GetPropertyChangedSignal("Text"):Connect(function()
+		applyQuery(box.Text)
+		clearBtn.Visible = #box.Text > 0
+	end)
+	Kit.bindTooltip(search, "F — перейти к поиску")
+
+	-- Правый кластер кнопок
+	local function hBtn(name, icon, tip, offset)
+		local b = Kit.iconButton(header, {
+			name = name, icon = icon, size = UDim2.fromOffset(36, 36),
+			pos = UDim2.new(1, offset, 0.5, 0), anchor = Vector2.new(0, 0.5),
+			bg = Theme.colors.surface, hoverBg = Theme.colors.surfaceHi,
+			iconSize = 17, iconColor = Theme.colors.text, radius = Theme.radius.md,
+		})
+		if tip then Kit.bindTooltip(b, tip) end
+		return b
+	end
+	UI.btnRefresh = hBtn("refresh", "refresh", "Обновить библиотеку", -56)
+	UI.btnRefresh.Activated:Connect(function() Audio.refreshLibrary() end)
+	UI.btnSettings = hBtn("settings", "gear", "Настройки и эффекты", -100)
+	UI.btnSettings.Activated:Connect(function() UI.toggleSettings() end)
+	UI.btnHelp = hBtn("help", "keyboard", "Горячие клавиши", -144)
+	UI.btnHelp.Activated:Connect(function() UI.toggleHelp() end)
+	UI.btnClose = hBtn("close", "close", "Свернуть (RCtrl — вернуть)", -188)
+	UI.btnClose.Activated:Connect(function()
+		UI.root.Visible = false
+		bus.Toast:Fire("Плеер свёрнут — Right Ctrl, чтобы вернуть", "info")
+	end)
+end
+
+-- перетаскивание: общий хелпер
+function Kit.makeDraggable(handle, target)
+	local dragging = false
+	local startMouse, startPos
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			startMouse = UIS:GetMouseLocation()
+			startPos = Vector2.new(target.Position.X.Offset, target.Position.Y.Offset)
+		end
+	end)
+	U.trackConn(UIS.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
+			dragging = false
+			Nova.config.data.pos = { target.Position.X.Offset, target.Position.Y.Offset }
+			Nova.config.save()
+		end
+	end))
+	U.trackConn(UIS.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			local m = UIS:GetMouseLocation()
+			target.Position = UDim2.new(0.5, startPos.X + (m.X - startMouse.X), 0.5, startPos.Y + (m.Y - startMouse.Y))
+		end
+	end))
+end
+
+--────────────────────────── Список треков ──────────────────────────
+local ROW_H, ROW_GAP = 52, 5
+UI.ROW_H, UI.ROW_GAP = ROW_H, ROW_GAP
+
+local function buildList()
+	local list = Kit.new("ScrollingFrame", {
+		Name = "TrackList",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Position = UDim2.new(0, Theme.layers.sidebarW, 0, Theme.layers.headerH),
+		Size = UDim2.new(1, -Theme.layers.sidebarW, 1, -(Theme.layers.headerH + Theme.layers.playerH)),
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		ScrollBarThickness = 0,
+		ElasticBehavior = Enum.ElasticBehavior.WhenScrollable,
+		Parent = UI.root,
+	}, UI.root)
+	UI.list = list
+	Kit.pad(list, 6, 6, 18, 10)
+
+	UI.listLayout = Kit.list(list, Enum.FillDirection.Vertical, ROW_GAP)
+
+	-- умный скроллбар: появляется при наведении/действии, тает в простое
+	UI.scroll = Kit.scrollbar(list, UI.root, { owner = list, width = 4 })
+end
+
+local function buildRow(track, i)
+	local row = Kit.new("TextButton", {
+		Name = "Row_" .. tostring(i),
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.colors.row,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -6, 0, ROW_H),
+		LayoutOrder = i,
+		Parent = UI.list,
+	}, UI.list)
+	Kit.corner(row, Theme.radius.md)
+
+	-- мини-обложка
+	local cover = Covers.make(row, 36, track)
+	cover.Position = UDim2.new(0, 8, 0.5, 0)
+	cover.AnchorPoint = Vector2.new(0, 0.5)
+
+	-- номер / глиф воспроизведения / эквалайзер
+	local indexLbl = Kit.label(row, {
+		Name = "Index",
+		Position = UDim2.new(0, 58, 0, 0),
+		Size = UDim2.new(0, 26, 1, 0),
+		Text = tostring(i),
+		Font = Theme.fonts.semi,
+		TextSize = 13,
+		TextColor3 = Theme.colors.textFaint,
+		TextXAlignment = Enum.TextXAlignment.Center,
+	})
+	local playHolder = Kit.new("Frame", {
+		Name = "PlayGlyph",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(16, 16),
+		Position = UDim2.new(0, 71, 0.5, 0),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = row,
+	}, row)
+	Icons.draw(playHolder, 16, "play", { color = Theme.colors.text, bg = Theme.colors.row })
+	Kit.fadeIcon(playHolder, 1) -- изначально невидим
+
+	local eqHolder = Kit.new("Frame", {
+		Name = "EQ",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(18, 18),
+		Position = UDim2.new(0, 71, 0.5, 0),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = row,
+	}, row)
+	local eqBars = {}
+	for b = 1, 3 do
+		eqBars[b] = Kit.new("Frame", {
+			Name = "Bar" .. b,
+			BackgroundColor3 = Theme.accent.flat,
+			AnchorPoint = Vector2.new(0.5, 1),
+			Position = UDim2.new(0, (b - 1) * 6 + 3, 1, 0),
+			Size = UDim2.fromOffset(3, 6),
+			Parent = eqHolder,
+		}, eqHolder)
+		Kit.corner(eqBars[b], 2)
+	end
+
+	-- заголовок / исполнитель
+	local title = Kit.label(row, {
+		Name = "Title",
+		Position = UDim2.new(0, 96, 0, 8),
+		Size = UDim2.new(1, -212, 0, 18),
+		Text = track.title,
+		Font = Theme.fonts.bold,
+		TextSize = 14,
+	})
+	local artist = Kit.label(row, {
+		Name = "Artist",
+		Position = UDim2.new(0, 96, 0, 27),
+		Size = UDim2.new(1, -212, 0, 14),
+		Text = track.artist .. (track.demo and "  ·  демо" or ""),
+		Font = Theme.fonts.semi,
+		TextSize = 12,
+		TextColor3 = Theme.colors.textDim,
+	})
+
+	-- длительность
+	local dur = Kit.label(row, {
+		Name = "Dur",
+		Position = UDim2.new(1, -110, 0, 0),
+		Size = UDim2.new(0, 40, 1, 0),
+		Text = U.fmtTime(track.duration),
+		Font = Theme.fonts.mono,
+		TextSize = 12,
+		TextColor3 = Theme.colors.textFaint,
+		TextXAlignment = Enum.TextXAlignment.Right,
+	})
+
+	-- сердце избранного
+	local liked0 = Nova.library.isLiked(track)
+	local heart = Kit.iconButton(row, {
+		name = "heart",
+		icon = liked0 and "heartFill" or "heartOutline",
+		size = UDim2.fromOffset(30, 30),
+		pos = UDim2.new(1, -52, 0.5, 0),
+		anchor = Vector2.new(0, 0.5),
+		bg = Theme.colors.row, hoverBg = Theme.colors.rowHover,
+		iconSize = 15, iconColor = liked0 and Theme.accent.flat or Theme.colors.textDim,
+		radius = Theme.radius.pill,
+		bgTrans = 1, stroke = false,
+		onClick = function()
+			local now = Nova.library.toggleLiked(track)
+			Kit.setIcon(heart, now and "heartFill" or "heartOutline", { iconColor = now and Theme.accent.flat or Theme.colors.textDim })
+			bus.Toast:Fire(now and "Добавлено в избранное" or "Убрано из избранного", "ok")
+			UI.updateCounts()
+			if UI.view == "liked" then UI.rebuildList() end
+		end,
+	})
+
+	-- ховер-поведение
+	row.MouseEnter:Connect(function()
+		Kit.tween(row, Theme.motion.fast, { BackgroundTransparency = 0.15 })
+		Kit.fadeIcon(playHolder, 0)
+		Kit.tween(indexLbl, Theme.motion.fast, { TextTransparency = 1 })
+		Kit.tween(heart, Theme.motion.fast, { BackgroundTransparency = 0 })
+	end)
+	row.MouseLeave:Connect(function()
+		local active = UI.isRowActive(track)
+		Kit.tween(row, Theme.motion.base, { BackgroundTransparency = active and 0 or 1 })
+		if not (active and Audio.state.playing) then
+			Kit.fadeIcon(playHolder, 1)
+			Kit.tween(indexLbl, Theme.motion.base, { TextTransparency = 0 })
+		end
+		Kit.tween(heart, Theme.motion.base, { BackgroundTransparency = 1 })
+	end)
+	row.Activated:Connect(function()
+		Audio.playTrack(track)
+	end)
+
+	Kit.fitText(title, row.AbsoluteSize.X > 0 and row.AbsoluteSize.X - 220 or 380)
+
+	return {
+		frame = row, track = track, index = i,
+		indexLbl = indexLbl, playHolder = playHolder, eqHolder = eqHolder,
+		eqBars = eqBars, title = title, artist = artist, dur = dur, heart = heart,
+		cover = cover,
+	}
+end
+
+function Kit.fadeIcon(holder, alpha)
+	for _, ch in ipairs(holder:GetChildren()) do
+		if ch:IsA("GuiObject") then
+			ch.BackgroundTransparency = alpha
+		end
+	end
+end
+
+function UI.isRowActive(track)
+	return Audio.state.track ~= nil and Audio.state.track.key == track.key
+end
+
+function UI.updateCounts()
+	UI.countLabel.Text = tostring(#Nova.library.tracks) .. " треков"
+	local n = 0
+	for _ in ipairs(Nova.config.data.liked) do n = n + 1 end
+	UI.likedLabel.Text = tostring(n) .. " в избранном"
+end
+
+function UI.setView(v)
+	UI.view = v
+	local function markActive(navBtn, active)
+		Kit.tween(navBtn.btn, Theme.motion.base, { BackgroundTransparency = active and 0.25 or 1 })
+		Kit.tween(navBtn.bar, Theme.motion.base, { BackgroundTransparency = active and 0 or 1 })
+		Kit.tween(navBtn.label, Theme.motion.base, { TextColor3 = active and Theme.colors.text or Theme.colors.textDim })
+	end
+	markActive(UI.navAll, v == "all")
+	markActive(UI.navLiked, v == "liked")
+	UI.viewTitle.Text = (v == "all") and "Твоя музыка" or "Избранное"
+	UI.rebuildList()
+end
+
+function UI.setQuery(q)
+	UI.query = U.lowerRu(q)
+	UI.rebuildList()
+end
+
+function UI.filteredTracks()
+	local out = {}
+	for _, t in ipairs(Nova.library.tracks) do
+		local okView = (UI.view == "all") or (UI.view == "liked" and Nova.library.isLiked(t))
+		local okQuery = #UI.query == 0
+			or U.lowerRu(t.title):find(UI.query, 1, true)
+			or U.lowerRu(t.artist):find(UI.query, 1, true)
+		if okView and okQuery then
+			out[#out + 1] = t
+		end
+	end
+	return out
+end
+
+function UI.rebuildList()
+	-- полная очистка: строки и пустые заглушки
+	for _, ch in ipairs(UI.list:GetChildren()) do
+		if (ch:IsA("TextButton") and ch.Name:sub(1, 4) == "Row_") or ch.Name == "Empty" then
+			ch:Destroy()
+		end
+	end
+	UI.rows = {}
+	local tracks = UI.filteredTracks()
+	for i, t in ipairs(tracks) do
+		UI.rows[i] = buildRow(t, i)
+	end
+	if #tracks == 0 then
+		Kit.label(UI.list, {
+			Name = "Empty",
+			Size = UDim2.new(1, -10, 0, 120),
+			LayoutOrder = 9999,
+			Text = "Ничего не найдено\nДобавьте JSON в NovaMusicData/Songs",
+			Font = Theme.fonts.semi,
+			TextSize = 14,
+			TextColor3 = Theme.colors.textFaint,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+		})
+	end
+	UI.updateCounts()
+	UI.viewSub.Text = tostring(#tracks) .. " трек(ов) · обновлено " .. os.date("%H:%M")
+	UI.updateRowStates()
+	task.defer(function()
+		if UI.scroll and UI.scroll.sync then UI.scroll.sync() end
+	end)
+end
+
+function UI.updateRowStates()
+	for _, r in ipairs(UI.rows) do
+		local active = UI.isRowActive(r.track)
+		local playing = active and Audio.state.playing
+		r.title.TextColor3 = active and Theme.accent.flat or Theme.colors.text
+		Kit.tween(r.frame, Theme.motion.base, { BackgroundTransparency = active and 0 or 1, BackgroundColor3 = active and Theme.colors.rowActive or Theme.colors.row })
+		r.eqHolder.Visible = playing
+		if not (playing) then
+			Kit.fadeIcon(r.playHolder, 1)
+			r.indexLbl.TextTransparency = 0
+		else
+			r.indexLbl.TextTransparency = 1
+			Kit.fadeIcon(r.playHolder, 1)
+		end
+	end
+end
+
+-- Эквалайзер активной строки: живые столбики в такт
+function UI.startEQTicker()
+	if UI.eqConn then return end
+	local acc = 0
+	UI.eqConn = RunService.Heartbeat:Connect(function(dt)
+		acc = acc + dt
+		local st = Audio.state
+		if not (st.playing and st.track) then return end
+		local t = os.clock()
+		local row = nil
+		for _, r in ipairs(UI.rows) do
+			if r.track and UI.isRowActive(r.track) then row = r break end
+		end
+		if row and row.eqHolder.Visible then
+			local bpmF = (st.track.bpm or 104) / 104
+			for b = 1, 3 do
+				local h = 5 + math.abs(math.sin(t * 6 * bpmF + b * 1.7)) * 11
+				row.eqBars[b].Size = UDim2.fromOffset(3, h)
+			end
+		end
+	end)
+	U.trackConn(UI.eqConn)
+end
+
+--══════════════════════════ Часть 10: Панели и плеер-бар ══════════════════════════
+-- Нижний плеер-бар (транспорт, слайдеры), караоке-полоса, панель настроек
+-- с эффектами, панель справки, «всплеск слов» и монтаж тостов/тултипов.
+
+local U = Nova.util
+local bus = Nova.bus
+local Theme = Nova.theme
+local Kit = Nova.kit
+local Icons = Nova.icons
+local Audio = Nova.audio
+local Covers = Nova.covers
+local Lyrics = Nova.lyrics
+
+local P = Theme.colors
+local F = Theme.fonts
+
+--────────────────────────── Плеер-бар ──────────────────────────
+local function buildPlayerBar()
+	local bar = Kit.new("Frame", {
+		Name = "PlayerBar",
+		BackgroundColor3 = P.bgSoft,
+		BorderSizePixel = 0,
+		Position = UDim2.new(0, 0, 1, -Theme.layers.playerH),
+		Size = UDim2.new(1, 0, 0, Theme.layers.playerH),
+		Parent = UI.root,
+	}, UI.root)
+	Kit.corner(bar, Theme.radius.xl)
+	Kit.stroke(bar, P.white, 0.94, 1)
+	-- верхняя световая линия
+	local topLine = Kit.new("Frame", {
+		BackgroundColor3 = P.white,
+		BackgroundTransparency = 0.93,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, -32, 0, 1),
+		Position = UDim2.new(0, 16, 0, 0),
+		Parent = bar,
+	}, bar)
+
+	-- Левая зона: обложка + названия
+	local coverHolder = Kit.new("Frame", {
+		Name = "NowCover",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(60, 60),
+		Position = UDim2.new(0, 18, 0.5, 0),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Parent = bar,
+	}, bar)
+	UI.nowCover = coverHolder
+	local nowTitle = Kit.label(bar, {
+		Name = "NowTitle",
+		Position = UDim2.new(0, 92, 0, 28),
+		Size = UDim2.new(0, 148, 0, 18),
+		Text = "Ничего не играет",
+		Font = F.bold,
+		TextSize = 14,
+	})
+	local nowArtist = Kit.label(bar, {
+		Name = "NowArtist",
+		Position = UDim2.new(0, 92, 0, 48),
+		Size = UDim2.new(0, 148, 0, 14),
+		Text = "выберите трек из списка",
+		Font = F.semi,
+		TextSize = 11,
+		TextColor3 = P.textDim,
+	})
+	UI.nowTitle, UI.nowArtist = nowTitle, nowArtist
+	local heartNow = Kit.iconButton(bar, {
+		name = "heartNow", icon = "heartOutline",
+		size = UDim2.fromOffset(30, 30),
+		pos = UDim2.new(0, 244, 0.5, 0), anchor = Vector2.new(0, 0.5),
+		bg = P.bgSoft, hoverBg = P.surfaceHi,
+		iconSize = 15, iconColor = P.textDim, radius = Theme.radius.pill,
+		stroke = false,
+		onClick = function()
+			if not Audio.state.track then return end
+			local now = Nova.library.toggleLiked(Audio.state.track)
+			Kit.setIcon(heartNow, now and "heartFill" or "heartOutline", { iconColor = now and Theme.accent.flat or P.textDim })
+			bus.Toast:Fire(now and "Добавлено в избранное" or "Убрано из избранного", "ok")
+			UI.updateCounts()
+		end,
+	})
+	UI.heartNow = heartNow
+
+	-- Центральная зона: транспорт
+	local cx = 384
+	UI.btnShuffle = Kit.iconButton(bar, {
+		name = "shuffle", icon = "shuffle", size = UDim2.fromOffset(34, 34),
+		pos = UDim2.new(0, cx, 0, 14), bg = P.bgSoft, hoverBg = P.surfaceHi,
+		iconSize = 17, iconColor = P.textDim, radius = Theme.radius.pill, stroke = false,
+		onClick = function() Audio.toggleShuffle() end,
+	})
+	Kit.bindTooltip(UI.btnShuffle, "Шаффл (S)")
+	UI.btnPrev = Kit.iconButton(bar, {
+		name = "prev", icon = "prev", size = UDim2.fromOffset(38, 38),
+		pos = UDim2.new(0, cx + 42, 0, 12), bg = P.bgSoft, hoverBg = P.surfaceHi,
+		iconSize = 19, iconColor = P.text, radius = Theme.radius.pill, stroke = false,
+		onClick = function() Audio.prev() end,
+	})
+	Kit.bindTooltip(UI.btnPrev, "Предыдущий")
+	UI.btnPlay = Kit.iconButton(bar, {
+		name = "play", icon = "play", size = UDim2.fromOffset(54, 54),
+		pos = UDim2.new(0, cx + 88, 0, 4), bg = Theme.accent.flat, hoverBg = Theme.accent.flat,
+		iconSize = 20, iconColor = P.black, radius = Theme.radius.pill, stroke = false,
+		onClick = function() Audio.toggle() end,
+	})
+	Kit.grad(UI.btnPlay, Theme.accent.c1, Theme.accent.c2, 40)
+	UI.markAccent(UI.btnPlay, "grad")
+	Kit.bindTooltip(UI.btnPlay, "Пауза / Воспроизведение (Space)")
+	UI.btnNext = Kit.iconButton(bar, {
+		name = "next", icon = "next", size = UDim2.fromOffset(38, 38),
+		pos = UDim2.new(0, cx + 150, 0, 12), bg = P.bgSoft, hoverBg = P.surfaceHi,
+		iconSize = 19, iconColor = P.text, radius = Theme.radius.pill, stroke = false,
+		onClick = function() Audio.next(true) end,
+	})
+	Kit.bindTooltip(UI.btnNext, "Следующий")
+	UI.btnLoop = Kit.iconButton(bar, {
+		name = "loop", icon = "repeat", size = UDim2.fromOffset(34, 34),
+		pos = UDim2.new(0, cx + 196, 0, 14), bg = P.bgSoft, hoverBg = P.surfaceHi,
+		iconSize = 17, iconColor = P.textDim, radius = Theme.radius.pill, stroke = false,
+		onClick = function() Audio.cycleLoop() end,
+	})
+	Kit.bindTooltip(UI.btnLoop, "Зацикливание (L)")
+
+	-- Полоса перемотки
+	local timeCur = Kit.label(bar, {
+		Name = "TimeCur",
+		Position = UDim2.new(0, cx + 4, 0, 66),
+		Size = UDim2.new(0, 36, 0, 16),
+		Text = "0:00",
+		Font = F.mono,
+		TextSize = 11,
+		TextColor3 = P.textDim,
+	})
+	local seek = Kit.slider(bar, {
+		size = UDim2.new(0, 190, 0, 18),
+		pos = nil, -- позиция зададим ниже
+		value = 0, barH = 5,
+		onChange = function(v, dragging)
+			local st = Audio.state
+			if dragging then
+				timeCur.Text = U.fmtTime(v * st.duration)
+			else
+				Audio.seekTo(v * st.duration)
+			end
+		end,
+	})
+	seek.root.Position = UDim2.new(0, cx + 48, 0, 64)
+	local timeDur = Kit.label(bar, {
+		Name = "TimeDur",
+		Position = UDim2.new(0, cx + 246, 0, 66),
+		Size = UDim2.new(0, 36, 0, 16),
+		Text = "0:00",
+		Font = F.mono,
+		TextSize = 11,
+		TextColor3 = P.textDim,
+	})
+	UI.timeCur, UI.timeDur, UI.seek = timeCur, timeDur, seek
+	UI.markAccent(seek.fill, "fill")
+
+	-- Правая зона: караоке, эффекты, громкость
+	UI.fxBtn = Kit.iconButton(bar, {
+		name = "fx", icon = "sliders", size = UDim2.fromOffset(36, 36),
+		pos = UDim2.new(1, -274, 0.5, 0), anchor = Vector2.new(0, 0.5),
+		bg = P.surface, hoverBg = P.surfaceHi,
+		iconSize = 18, iconColor = P.text, radius = Theme.radius.md,
+		onClick = function() UI.toggleSettings() end,
+	})
+	Kit.bindTooltip(UI.fxBtn, "Эффекты и настройки")
+	UI.karaokeBtn = Kit.iconButton(bar, {
+		name = "karaoke", icon = "sparkle", size = UDim2.fromOffset(36, 36),
+		pos = UDim2.new(1, -230, 0.5, 0), anchor = Vector2.new(0, 0.5),
+		bg = P.surface, hoverBg = P.surfaceHi,
+		iconSize = 18, iconColor = Nova.config.data.karaoke and Theme.accent.flat or P.textDim,
+		radius = Theme.radius.md,
+		onClick = function() UI.setKaraoke(not UI.karaokeOn) end,
+	})
+	Kit.bindTooltip(UI.karaokeBtn, "Караоке (K)")
+	UI.volIcon = Kit.iconButton(bar, {
+		name = "vol", icon = "volume", size = UDim2.fromOffset(32, 32),
+		pos = UDim2.new(1, -40, 0.5, 0), anchor = Vector2.new(0, 0.5),
+		bg = P.bgSoft, hoverBg = P.surfaceHi,
+		iconSize = 17, iconColor = P.text, radius = Theme.radius.pill, stroke = false,
+		onClick = function() Audio.toggleMute() end,
+	})
+	Kit.bindTooltip(UI.volIcon, "Звук (M)")
+	local vol = Kit.slider(bar, {
+		size = UDim2.new(0, 126, 0, 18),
+		value = Nova.config.data.muted and 0 or Nova.config.data.volume,
+		barH = 5,
+		onChange = function(v)
+			Audio.setVolume(v)
+		end,
+	})
+	vol.root.Position = UDim2.new(1, -186, 0.5, 0)
+	vol.root.AnchorPoint = Vector2.new(0, 0.5)
+	UI.vol = vol
+	UI.markAccent(vol.fill, "fill")
+	Kit.bindTooltip(vol.root, "Колесо мыши — точная настройка")
+
+	UI.playerBar = bar
+end
+
+--────────────────────────── Караоке-полоса ──────────────────────────
+local function buildKaraokeStrip()
+	local strip = Kit.new("Frame", {
+		Name = "KaraokeStrip",
+		BackgroundColor3 = P.bgSoft,
+		BackgroundTransparency = 0.15,
+		BorderSizePixel = 0,
+		Position = UDim2.new(0, Theme.layers.sidebarW, 1, -(Theme.layers.playerH + 96)),
+		Size = UDim2.new(1, -Theme.layers.sidebarW, 0, 96),
+		ClipsDescendants = true,
+		Visible = false,
+		Parent = UI.root,
+	}, UI.root)
+	Kit.stroke(strip, P.white, 0.95, 1)
+
+	local cap = Kit.label(strip, {
+		Name = "Caption",
+		Position = UDim2.new(0, 36, 0, 8),
+		Size = UDim2.new(0, 200, 0, 12),
+		Text = "КАРАОКЕ",
+		Font = F.bold,
+		TextSize = 9,
+		TextColor3 = P.textFaint,
+	})
+	local capIcon = Kit.new("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(11, 11),
+		Position = UDim2.new(0, 18, 0, 8),
+		Parent = strip,
+	}, strip)
+	Icons.draw(capIcon, 11, "sparkle", { color = Theme.accent.flat, bg = P.bgSoft })
+	UI.markAccent(cap, "text")
+
+	-- контейнер строки слов
+	local lineHolder = Kit.new("Frame", {
+		Name = "LineHolder",
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.58, 0),
+		Size = UDim2.new(1, -48, 0, 40),
+		ClipsDescendants = false,
+		Parent = strip,
+	}, strip)
+	Kit.list(lineHolder, Enum.FillDirection.Horizontal, 7)
+	UI.karaokeStrip = strip
+	UI.karaokeLineHolder = lineHolder
+	UI.karaokeWordLabels = {}
+	UI.karaokeLineText = nil
+
+	-- большая «строка» под полосой не нужна: слова рисуются крупно в LineHolder
+end
+
+local function karaokeBuildLine(line)
+	for _, ch in ipairs(UI.karaokeLineHolder:GetChildren()) do
+		if ch:IsA("TextLabel") then ch:Destroy() end
+	end
+	UI.karaokeWordLabels = {}
+	UI.karaokeLineText = line
+	if not line then return end
+	if line.instrumental then
+		local l = Kit.label(UI.karaokeLineHolder, {
+			Text = "· · ·",
+			Font = F.bold,
+			TextSize = 18,
+			TextColor3 = P.textFaint,
+			TextTransparency = 1,
+		})
+		Kit.tween(l, Theme.motion.smooth, { TextTransparency = 0.25 })
+		UI.karaokeWordLabels[1] = l
+		return
+	end
+	local scale = 1
+	local maxLen = 34
+	if #line.text > maxLen then scale = math.max(maxLen / #line.text, 0.6) end
+	local size = math.floor(21 * scale)
+	for wi, w in ipairs(line.words) do
+		local l = Kit.label(UI.karaokeLineHolder, {
+			Text = w,
+			Font = F.black,
+			TextSize = size,
+			TextColor3 = P.textFaint,
+			LayoutOrder = wi,
+			AutomaticSize = Enum.AutomaticSize.XY,
+			Size = UDim2.fromOffset(0, size + 6),
+		})
+		UI.karaokeWordLabels[wi] = l
+	end
+	-- вход строки: лёгкий подъём
+	for _, l in ipairs(UI.karaokeWordLabels) do
+		l.TextTransparency = 1
+	end
+	task.delay(0.01, function()
+		for i, l in ipairs(UI.karaokeWordLabels) do
+			task.delay(0.03 * i, function()
+				if l.Parent then
+					Kit.tween(l, Theme.motion.base, { TextTransparency = 0 })
+				end
+			end)
+		end
+	end)
+end
+
+local function karaokeHighlight(wi)
+	local labels = UI.karaokeWordLabels
+	if not labels then return end
+	for i, l in ipairs(labels) do
+		if l.Text == "· · ·" then return end
+		if i < wi then
+			Kit.tween(l, Theme.motion.fast, { TextColor3 = P.text })
+		elseif i == wi then
+			Kit.tween(l, Theme.motion.pop, { TextColor3 = Theme.accent.flat })
+		else
+			Kit.tween(l, Theme.motion.fast, { TextColor3 = P.textFaint })
+		end
+	end
+end
+
+-- публикация локальных обработчиков для части 11
+UI.karaokeBuildLine = karaokeBuildLine
+UI.karaokeHighlight = karaokeHighlight
+
+--────────────────────────── Всплеск слов при смене трека ──────────────────────────
+local function buildBurstLayer()
+	local layer = Kit.new("Frame", {
+		Name = "BurstLayer",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		ClipsDescendants = true,
+		Parent = UI.screen,
+		ZIndex = 50,
+	}, UI.screen)
+	UI.burstLayer = layer
+end
+
+function UI.wordBurst(track)
+	if not UI.karaokeOn then return end
+	local layer = UI.burstLayer
+	if not layer then return end
+	local words = Lyrics.burstWords(track, 8)
+	local origin = UI.root.AbsolutePosition
+	for i, w in ipairs(words) do
+		local l = Kit.label(layer, {
+			Text = w,
+			Font = (i % 2 == 0) and F.black or F.bold,
+			TextSize = 14 + math.random(0, 14),
+			TextColor3 = (i % 3 == 0) and Theme.accent.flat or P.white,
+			TextTransparency = 0.35,
+			Rotation = math.random(-16, 16),
+			Position = UDim2.fromOffset(
+				origin.X + Theme.layers.sidebarW + math.random(30, 600),
+				origin.Y + 90 + math.random(0, 330)
+			),
+			ZIndex = 51,
+		})
+		Kit.tween(l, TweenInfo.new(1.3 + math.random() * 0.8, Enum.EasingStyle.Quint, Enum.EasingDirection.In), {
+			Position = l.Position - UDim2.fromOffset(0, 90 + math.random(0, 70)),
+			TextTransparency = 1,
+			Rotation = l.Rotation + math.random(-8, 8),
+		})
+		task.delay(2.3, function()
+			if l.Parent then l:Destroy() end
+		end)
+	end
+end
+
+--────────────────────────── Панель настроек ──────────────────────────
+local function buildSettings()
+	local panel = Kit.new("Frame", {
+		Name = "SettingsPanel",
+		BackgroundColor3 = P.surface,
+		BackgroundTransparency = 0.03,
+		BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 12, 0, 12),
+		Size = UDim2.new(0, 296, 1, -Theme.layers.playerH - 24),
+		Visible = false,
+		Parent = UI.root,
+		ZIndex = 60,
+	}, UI.root)
+	Kit.corner(panel, Theme.radius.xl)
+	Kit.stroke(panel, P.white, 0.88, 1)
+	Kit.pad(panel, 14, 12, 14, 12)
+	local scroll = Kit.new("ScrollingFrame", {
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 1, 0),
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 0,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		Parent = panel,
+	}, panel)
+	Kit.list(scroll, Enum.FillDirection.Vertical, 8)
+	Kit.scrollbar(scroll, panel, { width = 3 })
+
+	Kit.label(scroll, {
+		Text = "Настройки",
+		Font = F.black,
+		TextSize = 17,
+		Size = UDim2.new(1, 0, 0, 22),
+		LayoutOrder = 1,
+	})
+	Kit.label(scroll, {
+		Text = "Акцент интерфейса",
+		Font = F.bold, TextSize = 11, TextColor3 = P.textFaint,
+		Size = UDim2.new(1, 0, 0, 14),
+		LayoutOrder = 2,
+	})
+	local accentRow = Kit.new("Frame", {
+		BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 34), LayoutOrder = 3,
+		Parent = scroll,
+	}, scroll)
+	Kit.list(accentRow, Enum.FillDirection.Horizontal, 8)
+	UI.accentDots = {}
+	for key, acc in pairs(Theme.accents) do
+		local d = Kit.new("TextButton", {
+			Name = "Accent_" .. key,
+			Text = "", AutoButtonColor = false,
+			BackgroundColor3 = acc.flat,
+			Size = UDim2.fromOffset(34, 34),
+			Parent = accentRow,
+		}, accentRow)
+		Kit.corner(d, Theme.radius.pill)
+		Kit.grad(d, acc.c1, acc.c2, 40)
+		Kit.stroke(d, P.white, 0.6, 1.4)
+		UI.accentDots[key] = d
+		d.Activated:Connect(function()
+			Theme.setAccent(key)
+			Nova.config.data.accent = key
+			Nova.config.save()
+		end)
+	end
+
+	local function sectionTitle(text, order)
+		Kit.label(scroll, {
+			Text = text, Font = F.bold, TextSize = 11, TextColor3 = P.textFaint,
+			Size = UDim2.new(1, 0, 0, 14), LayoutOrder = order,
+		})
+	end
+
+	-- Переключатели
+	sectionTitle("Поведение", 4)
+	local toggleRows = Kit.new("Frame", {
+		BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 108), LayoutOrder = 5,
+		Parent = scroll,
+	}, scroll)
+	Kit.list(toggleRows, Enum.FillDirection.Vertical, 6)
+	local function switch(parent, initial, onChange)
+		local sw = Kit.new("TextButton", {
+			Text = "", AutoButtonColor = false,
+			BackgroundColor3 = initial and Theme.accent.flat or P.surfaceHi,
+			Size = UDim2.fromOffset(40, 22),
+			Parent = parent,
+		}, parent)
+		Kit.corner(sw, Theme.radius.pill)
+		local knob = Kit.new("Frame", {
+			BackgroundColor3 = initial and P.black or P.textDim,
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = initial and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 2, 0.5, 0),
+			Size = UDim2.fromOffset(18, 18),
+			Parent = sw,
+		}, sw)
+		Kit.corner(knob, Theme.radius.pill)
+		local on = initial
+		sw.Activated:Connect(function()
+			on = not on
+			Kit.tween(sw, Theme.motion.fast, { BackgroundColor3 = on and Theme.accent.flat or P.surfaceHi })
+			Kit.tween(knob, Theme.motion.spring, {
+				Position = on and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 2, 0.5, 0),
+				BackgroundColor3 = on and P.black or P.textDim,
+			})
+			onChange(on)
+		end)
+		return sw
+	end
+	local function toggleRow(text, order, initial, onChange)
+		local r = Kit.new("Frame", {
+			BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 32),
+			LayoutOrder = order, Parent = toggleRows,
+		}, toggleRows)
+		Kit.label(r, {
+			Text = text, Font = F.semi, TextSize = 13,
+			Size = UDim2.new(1, -52, 1, 0),
+		})
+		switch(r, initial, onChange)
+		return r
+	end
+	toggleRow("Караоке-строка", 1, Nova.config.data.karaoke, function(on)
+		UI.setKaraoke(on)
+	end)
+	toggleRow("Умное скрытие элементов", 2, Nova.config.data.smartUI, function(on)
+		Nova.config.data.smartUI = on
+		Nova.config.save()
+		Nova.smart.setEnabled(on)
+	end)
+	toggleRow("Интро при запуске", 3, Nova.config.data.intro, function(on)
+		Nova.config.data.intro = on
+		Nova.config.save()
+	end)
+
+	-- Скорость
+	sectionTitle("Скорость воспроизведения", 6)
+	local speedRow = Kit.new("Frame", {
+		BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 7,
+		Parent = scroll,
+	}, scroll)
+	Kit.list(speedRow, Enum.FillDirection.Horizontal, 6)
+	UI.speedChips = {}
+	local speeds = { { 0.75, "0.75x" }, { 1, "1x" }, { 1.25, "1.25x" } }
+	for i, sp in ipairs(speeds) do
+		local chip = Kit.new("TextButton", {
+			Text = sp[2], AutoButtonColor = false,
+			Font = F.bold, TextSize = 12,
+			TextColor3 = P.text,
+			BackgroundColor3 = (math.abs((Nova.config.data.speed or 1) - sp[1]) < 0.01) and Theme.accent.flat or P.surfaceHi,
+			Size = UDim2.fromOffset(84, 28),
+			LayoutOrder = i,
+			Parent = speedRow,
+		}, speedRow)
+		Kit.corner(chip, Theme.radius.pill)
+		UI.speedChips[sp[1]] = chip
+		chip.Activated:Connect(function()
+			Audio.setSpeed(sp[1])
+			for k, c in pairs(UI.speedChips) do
+				c.BackgroundColor3 = P.surfaceHi
+			end
+			chip.BackgroundColor3 = Theme.accent.flat
+			bus.Toast:Fire("Скорость: " .. sp[2], "info")
+		end)
+	end
+
+	-- Пресеты эффектов
+	sectionTitle("Пресеты звука", 8)
+	local presetRow = Kit.new("Frame", {
+		BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 9,
+		Parent = scroll,
+	}, scroll)
+	Kit.list(presetRow, Enum.FillDirection.Horizontal, 6)
+	local presets = {
+		{ name = "Chill",  fx = { reverb = true } },
+		{ name = "Party",  fx = { bass = true } },
+		{ name = "Вокал",  fx = { vocal = true, treble = true } },
+		{ name = "Кино",   fx = { reverb = true, wide = true } },
+		{ name = "Сброс",  fx = {} },
+	}
+	for i, pr in ipairs(presets) do
+		local chip = Kit.new("TextButton", {
+			Text = pr.name, AutoButtonColor = false,
+			Font = F.bold, TextSize = 12, TextColor3 = P.text,
+			BackgroundColor3 = P.surfaceHi,
+			Size = UDim2.fromOffset(62, 28),
+			LayoutOrder = i, Parent = presetRow,
+		}, presetRow)
+		Kit.corner(chip, Theme.radius.pill)
+		Kit.stroke(chip, P.white, 0.92, 1)
+		chip.Activated:Connect(function()
+			for k in pairs(Nova.config.data.effects) do
+				Nova.config.data.effects[k] = pr.fx[k] == true
+			end
+			Nova.config.save()
+			Audio.buildEffects()
+			UI.syncEffectChips()
+			bus.Toast:Fire("Пресет: " .. pr.name, "ok")
+		end)
+	end
+
+	-- Фильтры
+	sectionTitle("Звуковые фильтры", 10)
+	local fxGrid = Kit.new("Frame", {
+		BackgroundTransparency = 1, Size = UDim2.new(0, 0, 0, 0), LayoutOrder = 11,
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = scroll,
+	}, scroll)
+	local grid = Instance.new("UIGridLayout")
+	grid.CellSize = UDim2.fromOffset(128, 30)
+	grid.CellPadding = UDim2.fromOffset(6, 6)
+	grid.SortOrder = Enum.SortOrder.LayoutOrder
+	grid.Parent = fxGrid
+	UI.fxChips = {}
+	local fxList = {
+		{ "bass", "Басс" }, { "vocal", "Вокал" },
+		{ "treble", "Верх" }, { "reverb", "Реверб" },
+		{ "wide", "Ширина" }, { "nightcore", "Найткор" },
+		{ "lofi", "Ло-фай" },
+	}
+	for i, fx in ipairs(fxList) do
+		local chip = Kit.new("TextButton", {
+			Name = "Fx_" .. fx[1],
+			Text = fx[2], AutoButtonColor = false,
+			Font = F.bold, TextSize = 12, TextColor3 = P.text,
+			BackgroundColor3 = Nova.config.data.effects[fx[1]] and Theme.accent.flat or P.surfaceHi,
+			LayoutOrder = i, Parent = fxGrid,
+		}, fxGrid)
+		Kit.corner(chip, Theme.radius.pill)
+		Kit.stroke(chip, P.white, 0.92, 1)
+		UI.fxChips[fx[1]] = chip
+		chip.Activated:Connect(function()
+			Audio.setEffect(fx[1], not Nova.config.data.effects[fx[1]])
+			UI.syncEffectChips()
+		end)
+	end
+
+	-- Выгрузить
+	local unloadBtn = Kit.new("TextButton", {
+		Text = "Выгрузить Nova Music", AutoButtonColor = false,
+		Font = F.bold, TextSize = 13, TextColor3 = P.white,
+		BackgroundColor3 = P.danger,
+		Size = UDim2.new(1, 0, 0, 36), LayoutOrder = 12,
+		Parent = scroll,
+	}, scroll)
+	Kit.corner(unloadBtn, Theme.radius.md)
+	unloadBtn.Activated:Connect(function()
+		if Nova.unload then Nova.unload() end
+	end)
+
+	UI.settingsPanel = panel
+	UI.settingsScroll = scroll
+end
+
+function UI.syncEffectChips()
+	for name, chip in pairs(UI.fxChips or {}) do
+		chip.BackgroundColor3 = Nova.config.data.effects[name] and Theme.accent.flat or P.surfaceHi
+	end
+end
+
+function UI.toggleSettings()
+	local p = UI.settingsPanel
+	if not p then return end
+	local isOpen = p:GetAttribute("Open") == true
+	if isOpen then
+		p:SetAttribute("Open", false)
+		Kit.tween(p, Theme.motion.base, { Position = UDim2.new(1, 12, 0, 12) })
+		task.delay(0.3, function()
+			if p:GetAttribute("Open") == false then p.Visible = false end
+		end)
+	else
+		p:SetAttribute("Open", true)
+		p.Visible = true
+		Kit.tween(p, Theme.motion.spring, { Position = UDim2.new(1, -12, 0, 12) })
+	end
+	-- подсветка кнопки эффектов (isOpen — значение ДО переключения)
+	Kit.setIcon(UI.fxBtn, "sliders", { iconColor = isOpen and P.textDim or Theme.accent.flat })
+end
+
+--────────────────────────── Панель справки ──────────────────────────
+local function buildHelp()
+	local modal = Kit.new("Frame", {
+		Name = "HelpModal",
+		BackgroundColor3 = P.bg,
+		BackgroundTransparency = 0.06,
+		BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		Size = UDim2.fromOffset(470, 424),
+		Visible = false,
+		Parent = UI.root,
+		ZIndex = 80,
+	}, UI.root)
+	Kit.corner(modal, Theme.radius.xl)
+	Kit.stroke(modal, P.white, 0.85, 1)
+	local dim = Kit.new("TextButton", {
+		Name = "Dim",
+		Text = "", AutoButtonColor = false,
+		BackgroundColor3 = P.black, BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Parent = modal,
+		ZIndex = 79,
+	}, modal)
+	Kit.label(modal, {
+		Position = UDim2.new(0, 22, 0, 18),
+		Size = UDim2.new(1, -44, 0, 24),
+		Text = "Управление",
+		Font = F.black, TextSize = 18, ZIndex = 81,
+	})
+	local rows = Kit.new("Frame", {
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 22, 0, 54),
+		Size = UDim2.new(1, -44, 1, -76),
+		Parent = modal,
+		ZIndex = 81,
+	}, modal)
+	Kit.list(rows, Enum.FillDirection.Vertical, 7)
+	local binds = {
+		{ "↑ / ↓", "переключение трека по плейлисту" },
+		{ "Space", "пауза / воспроизведение" },
+		{ "← / →", "перемотка назад / вперёд на 5 секунд" },
+		{ "M", "звук вкл / выкл" },
+		{ "L", "зацикливание: выкл → все → один" },
+		{ "S", "случайный порядок" },
+		{ "K", "караоке-строка" },
+		{ "F", "перейти к поиску" },
+		{ "Esc", "закрыть панели" },
+		{ "Right Ctrl", "скрыть / показать плеер" },
+	}
+	for i, b in ipairs(binds) do
+		local r = Kit.new("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0, 26),
+			LayoutOrder = i, ZIndex = 81,
+			Parent = rows,
+		}, rows)
+		local key = Kit.label(r, {
+			Text = b[1], Font = F.mono, TextSize = 12,
+			TextColor3 = Theme.accent.flat,
+			Size = UDim2.fromOffset(110, 26),
+			ZIndex = 82,
+		})
+		UI.markAccent(key, "text")
+		Kit.label(r, {
+			Position = UDim2.new(0, 120, 0, 0),
+			Size = UDim2.new(1, -120, 1, 0),
+			Text = b[2], Font = F.semi, TextSize = 13,
+			TextColor3 = P.textDim, ZIndex = 82,
+		})
+	end
+	Kit.label(modal, {
+		Position = UDim2.new(0, 22, 1, -34),
+		Size = UDim2.new(1, -44, 0, 18),
+		Text = "Свои треки: NovaMusicData/Songs/*.json   ·   демо-треки идут без звука в такт bpm",
+		Font = F.semi, TextSize = 10, TextColor3 = P.textFaint, ZIndex = 81,
+	})
+	UI.helpModal = modal
+	UI.helpDim = dim
+	dim.Activated:Connect(function() UI.toggleHelp() end)
+end
+
+function UI.toggleHelp()
+	local m = UI.helpModal
+	if not m then return end
+	local open = m.Visible
+	if open then
+		Kit.tween(m, Theme.motion.fast, { BackgroundTransparency = 1 })
+		task.delay(0.18, function() m.Visible = false end)
+	else
+		m.Visible = true
+		m.BackgroundTransparency = 1
+		Kit.tween(m, Theme.motion.spring, { BackgroundTransparency = 0.06 })
+	end
+end
+
+--────────────────────────── Монтаж служебных слоёв ──────────────────────────
+local function buildToasts()
+	local container = Kit.new("Frame", {
+		Name = "Toasts",
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -14, 0, 14),
+		Size = UDim2.new(0, 244, 0, 300),
+		Parent = UI.screen,
+		ZIndex = 200,
+	}, UI.screen)
+	Kit.list(container, Enum.FillDirection.Vertical, 8)
+	Kit.mountToasts(container)
+end
+
+-- Публичные функции UI, нужные внешним обработчикам
+function UI.setKaraoke(on)
+	UI.karaokeOn = on
+	Nova.config.data.karaoke = on
+	Nova.config.save()
+	local strip = UI.karaokeStrip
+	if strip then
+		strip.Visible = true
+		if on then
+			Kit.tween(strip, Theme.motion.smooth, { Position = UDim2.new(0, Theme.layers.sidebarW, 1, -(Theme.layers.playerH + 96)) })
+			Kit.tween(UI.list, Theme.motion.smooth, { Size = UDim2.new(1, -Theme.layers.sidebarW, 1, -(Theme.layers.headerH + Theme.layers.playerH + 100)) })
+			bus.KaraokeToggle:Fire(true)
+		else
+			Kit.tween(strip, Theme.motion.smooth, { Position = UDim2.new(0, Theme.layers.sidebarW, 1, -Theme.layers.playerH) })
+			Kit.tween(UI.list, Theme.motion.smooth, { Size = UDim2.new(1, -Theme.layers.sidebarW, 1, -(Theme.layers.headerH + Theme.layers.playerH)) })
+			task.delay(0.4, function()
+				if not UI.karaokeOn then strip.Visible = false end
+			end)
+			bus.KaraokeToggle:Fire(false)
+		end
+	end
+	if UI.karaokeBtn then
+		Kit.setIcon(UI.karaokeBtn, "sparkle", { iconColor = on and Theme.accent.flat or P.textDim })
+	end
+end
+
+function UI.refreshTransportIcons()
+	-- UI может быть ещё не собран (события приходят раньше сборки)
+	if not (UI.btnShuffle and UI.btnLoop) then return end
+	local d = Nova.config.data
+	Kit.setIcon(UI.btnShuffle, "shuffle", { iconColor = d.shuffle and Theme.accent.flat or P.textDim })
+	if d.loop == "one" then
+		Kit.setIcon(UI.btnLoop, "repeatOne", { iconColor = Theme.accent.flat })
+	elseif d.loop == "all" then
+		Kit.setIcon(UI.btnLoop, "repeat", { iconColor = Theme.accent.flat })
+	else
+		Kit.setIcon(UI.btnLoop, "repeat", { iconColor = P.textDim })
+	end
+end
+
+-- Сборка всего каркаса (вызывается из init)
+function UI.buildAll()
+	mountScreen()
+	buildRoot()
+	buildSidebar()
+	buildHeader()
+	buildList()
+	buildKaraokeStrip()
+	buildPlayerBar()
+	buildSettings()
+	buildHelp()
+	buildBurstLayer()
+	buildToasts()
+	Kit.mountTooltip(UI.screen)
+end
+
+--══════════════════════════ Часть 11: Логика, хоткеи, запуск ══════════════════════════
+-- Подписки на события движков, горячие клавиши, интро-последовательность,
+-- инициализация и полная выгрузка.
+
+local U = Nova.util
+local bus = Nova.bus
+local Theme = Nova.theme
+local Kit = Nova.kit
+local Icons = Nova.icons
+local Audio = Nova.audio
+local Covers = Nova.covers
+local UIS = Nova.services.Input
+local TweenService = Nova.services.Tween
+
+local P = Theme.colors
+local F = Theme.fonts
+
+--────────────────────────── Синхронизация UI с движками ──────────────────────────
+local function wireUI()
+	-- Смена трека
+	U.trackConn(bus.TrackChanged:Connect(function(track, index)
+		if not track then return end
+		-- обложка «сейчас играет»
+		for _, ch in ipairs(UI.nowCover:GetChildren()) do ch:Destroy() end
+		Covers.make(UI.nowCover, 60, track)
+		UI.nowTitle.Text = track.title
+		Kit.fitText(UI.nowTitle, 148)
+		UI.nowArtist.Text = track.artist .. (track.demo and "  ·  демо" or "")
+		local liked = Nova.library.isLiked(track)
+		Kit.setIcon(UI.heartNow, liked and "heartFill" or "heartOutline", { iconColor = liked and Theme.accent.flat or P.textDim })
+		UI.timeCur.Text = "0:00"
+		UI.timeDur.Text = U.fmtTime(Audio.state.duration)
+		UI.seek.set(0)
+		UI.updateRowStates()
+		UI.autoScrollTo(track)
+		Nova.smart.pulseOwner(UI.list)
+		UI.wordBurst(track)
+		if UI.karaokeBuildLine then UI.karaokeBuildLine(nil) end
+		UI.refreshTransportIcons()
+	end))
+
+	-- Плей / пауза
+	U.trackConn(bus.StateChanged:Connect(function(playing)
+		Kit.setIcon(UI.btnPlay, playing and "pause" or "play", { iconColor = P.black })
+		local sc = Kit.scalerOf(UI.btnPlay)
+		if sc then Kit.tween(sc, Theme.motion.spring, { Scale = 1 }) end
+		UI.updateRowStates()
+	end))
+
+	-- Время
+	U.trackConn(bus.TimeUpdated:Connect(function(t, dur)
+		if UI.seek and not UI.seek.isDragging() then
+			UI.seek.set(dur > 0 and t / dur or 0)
+		end
+		UI.timeCur.Text = U.fmtTime(t)
+		UI.timeDur.Text = U.fmtTime(dur)
+	end))
+
+	-- Громкость
+	U.trackConn(bus.VolumeChanged:Connect(function(v, muted)
+		if UI.vol and not UI.vol.isDragging() then
+			UI.vol.set(muted and 0 or v)
+		end
+		Kit.setIcon(UI.volIcon, muted and "volumeMute" or "volume", { iconColor = P.text })
+	end))
+
+	-- Караоке: строка и слово
+	U.trackConn(bus.KaraokeLine:Connect(function(line)
+		if UI.karaokeBuildLine then UI.karaokeBuildLine(line) end
+	end))
+	U.trackConn(bus.KaraokeWord:Connect(function(wi)
+		if UI.karaokeHighlight then UI.karaokeHighlight(wi) end
+	end))
+
+	-- Библиотека
+	U.trackConn(bus.LibChanged:Connect(function()
+		UI.rebuildList()
+		UI.updateCounts()
+	end))
+
+	-- Акцент
+	U.trackConn(bus.AccentChanged:Connect(function(key)
+		UI.applyAccent()
+		for k, dot in pairs(UI.accentDots or {}) do
+			local st = dot:FindFirstChildOfClass("UIStroke")
+			if st then st.Transparency = (k == key) and 0.1 or 0.6 end
+		end
+		UI.syncEffectChips()
+		for k, chip in pairs(UI.speedChips or {}) do
+			if math.abs((Nova.config.data.speed or 1) - k) < 0.01 then
+				chip.BackgroundColor3 = Theme.accent.flat
+			end
+		end
+	end))
+end
+
+-- Прокрутка списка к активному треку
+function UI.autoScrollTo(track)
+	for i, r in ipairs(UI.rows) do
+		if r.track and r.track.key == track.key then
+			local target = (i - 1) * (UI.ROW_H + UI.ROW_GAP)
+			local view = UI.list.AbsoluteWindowSize.Y
+			local center = math.max(target - (view - UI.ROW_H) / 2, 0)
+			Kit.tween(UI.list, TweenInfo.new(0.4, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+				CanvasPosition = Vector2.new(0, center),
+			})
+			return
+		end
+	end
+end
+
+--────────────────────────── Горячие клавиши ──────────────────────────
+function Nova.setupHotkeys()
+	U.trackConn(UIS.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+		if not Nova.running then return end
+		local kc = input.KeyCode
+		local tracks = UI.filteredTracks()
+
+		if kc == Enum.KeyCode.Up or kc == Enum.KeyCode.Down then
+			if #tracks == 0 then return end
+			local cur = 0
+			if Audio.state.track then
+				for i, t in ipairs(tracks) do
+					if t.key == Audio.state.track.key then cur = i break end
+				end
+			end
+			local nxt
+			if kc == Enum.KeyCode.Up then
+				nxt = (cur <= 1) and 1 or cur - 1
+			else
+				nxt = (cur >= #tracks) and #tracks or cur + 1
+			end
+			if tracks[nxt] then
+				Audio.loadTrack(tracks[nxt], tracks[nxt].index or nxt, true)
+			end
+		elseif kc == Enum.KeyCode.Space then
+			Audio.toggle()
+		elseif kc == Enum.KeyCode.Left then
+			Audio.seekTo(Audio.state.time - 5)
+		elseif kc == Enum.KeyCode.Right then
+			Audio.seekTo(Audio.state.time + 5)
+		elseif kc == Enum.KeyCode.M then
+			Audio.toggleMute()
+		elseif kc == Enum.KeyCode.L then
+			Audio.cycleLoop()
+		elseif kc == Enum.KeyCode.S then
+			Audio.toggleShuffle()
+		elseif kc == Enum.KeyCode.K then
+			UI.setKaraoke(not UI.karaokeOn)
+		elseif kc == Enum.KeyCode.F then
+			if UI.searchBox then
+				UI.root.Visible = true
+				UI.searchBox:CaptureFocus()
+			end
+		elseif kc == Enum.KeyCode.Escape then
+			if UI.helpModal and UI.helpModal.Visible then UI.toggleHelp() end
+			local sp = UI.settingsPanel
+			if sp and sp:GetAttribute("Open") then UI.toggleSettings() end
+			if UI.searchBox then UI.searchBox:ReleaseFocus() end
+		elseif kc == Enum.KeyCode.RightControl then
+			local r = UI.root
+			r.Visible = not r.Visible
+			if r.Visible then
+				local sc = r:FindFirstChildOfClass("UIScale")
+				if not sc then
+					sc = Instance.new("UIScale")
+					sc.Parent = r
+				end
+				sc.Scale = 0.96
+				Kit.tween(sc, Theme.motion.spring, { Scale = 1 })
+			else
+				bus.Toast:Fire("Right Ctrl — вернуть плеер", "info")
+			end
+		end
+	end))
+end
+
+--────────────────────────── Интро ──────────────────────────
+function UI.runIntro(onDone)
+	if not Nova.config.data.intro then
+		onDone()
+		return
+	end
+	local layer = Kit.new("TextButton", {
+		Name = "IntroLayer",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundColor3 = P.black,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		ZIndex = 400,
+		Parent = UI.screen,
+	}, UI.screen)
+
+	local center = Kit.new("Frame", {
+		Name = "IntroCenter",
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		Size = UDim2.fromOffset(320, 240),
+		Parent = layer,
+	}, layer)
+	local scaler = Instance.new("UIScale")
+	scaler.Scale = 0.86
+	scaler.Parent = center
+
+	-- векторная эмблема: кольцо + диск + прорезь-нота
+	local mark = Kit.new("Frame", {
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 6),
+		Size = UDim2.fromOffset(84, 84),
+		Parent = center,
+	}, center)
+	local mp = Nova.nvg.pen(mark, 84, 24)
+	mp.color = Theme.accent.flat
+	mp:ring(12, 12, 20.5, 1.7, -55, 285)
+	mp.color = Theme.accent.c2
+	mp:circle(12, 12, 12.5)
+	mp.color = P.black
+	mp:circle(11.6, 14.6, 4.6)
+	mp.color = P.black
+	mp:rect(13.1, 5.9, 1.7, 9.0, 0.8)
+
+	Kit.label(center, {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 100),
+		Size = UDim2.fromOffset(320, 40),
+		Text = "NOVA MUSIC",
+		Font = F.black,
+		TextSize = 32,
+		TextXAlignment = Enum.TextXAlignment.Center,
+	})
+	Kit.label(center, {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 140),
+		Size = UDim2.fromOffset(320, 16),
+		Text = "AURORA AUDIO ENGINE",
+		Font = F.semi,
+		TextSize = 10,
+		TextColor3 = P.textFaint,
+		TextXAlignment = Enum.TextXAlignment.Center,
+	})
+	-- прогресс-полоса интро
+	local pTrack = Kit.new("Frame", {
+		BackgroundColor3 = P.surfaceHi,
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 176),
+		Size = UDim2.fromOffset(150, 3),
+		Parent = center,
+	}, center)
+	Kit.corner(pTrack, 2)
+	local pFill = Kit.new("Frame", {
+		BackgroundColor3 = Theme.accent.flat,
+		Size = UDim2.fromOffset(0, 3),
+		Parent = pTrack,
+	}, pTrack)
+	Kit.corner(pFill, 2)
+	Kit.grad(pFill, Theme.accent.c1, Theme.accent.c2, 0)
+
+	local finished = false
+	local function finish()
+		if finished then return end
+		finished = true
+		onDone()
+		Kit.tween(layer, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { BackgroundTransparency = 1 })
+		Kit.tween(center, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.In), { BackgroundTransparency = 1 })
+		task.delay(0.5, function()
+			if layer.Parent then layer:Destroy() end
+		end)
+	end
+
+	layer.Activated:Connect(finish)
+	Kit.tween(layer, Theme.motion.fast, { BackgroundTransparency = 0 })
+	Kit.tween(scaler, Theme.motion.spring, { Scale = 1 })
+	Kit.tween(pFill, TweenInfo.new(1.7, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), { Size = UDim2.fromOffset(150, 3) })
+	task.delay(2.05, finish)
+end
+
+--────────────────────────── Инициализация ──────────────────────────
+function Nova.init()
+	if not Nova.running then return end
+	Nova.running = true
+	math.randomseed(math.floor(os.clock() * 100000) % 2147483647)
+
+	-- 1) Файлы, конфиг, библиотека
+	Nova.library.init()
+
+	-- 2) Акцент из конфига
+	if Theme.accents[Nova.config.data.accent] then
+		Theme.setAccent(Nova.config.data.accent)
+	end
+
+	-- 3) Интерфейс
+	UI.buildAll()
+	wireUI()
+	UI.setView("all")
+	UI.karaokeOn = Nova.config.data.karaoke
+	UI.setKaraoke(Nova.config.data.karaoke)
+	UI.refreshTransportIcons()
+	UI.applyAccent()
+	UI.syncEffectChips()
+	UI.startEQTicker()
+	Nova.smart.setEnabled(Nova.config.data.smartUI)
+	Audio.applyVolume()
+	Nova.setupHotkeys()
+
+	-- 4) Последний трек (без автозапуска)
+	local okLast = false
+	if type(Nova.config.data.lastTrack) == "string" then
+		local t = Nova.library.findByKey(Nova.config.data.lastTrack)
+		if t then
+			Audio.loadTrack(t, t.index or 1, false)
+			okLast = true
+		end
+	end
+
+	-- 5) Интро и появление окна
+	UI.root.Visible = false
+	local rootScale = Instance.new("UIScale")
+	rootScale.Scale = 0.94
+	rootScale.Parent = UI.root
+	local function reveal()
+		UI.root.Visible = true
+		Kit.tween(rootScale, Theme.motion.spring, { Scale = 1 })
+	end
+	UI.runIntro(reveal)
+
+	task.delay(2.3, function()
+		if Nova.running then
+			bus.Toast:Fire("Nova Music готова · " .. tostring(#Nova.library.tracks) .. " трек(ов)" .. (okLast and "" or " · демо-режим"), "ok")
+		end
+	end)
+
+	Nova.exportAPI()
+end
+
+--────────────────────────── Выгрузка ──────────────────────────
+function Nova.unload()
+	if not Nova.running then return end
+	Nova.running = false
+	-- остановить звук
+	if Audio.sound then
+		pcall(function() Audio.sound:Stop() end)
+		pcall(function() Audio.sound:Destroy() end)
+		Audio.sound = nil
+	end
+	-- симуляция
+	if Audio.simConn then
+		Audio.simConn:Disconnect()
+		Audio.simConn = nil
+	end
+	-- соединения
+	for _, c in ipairs(Nova.conns) do
+		pcall(function() c:Disconnect() end)
+	end
+	Nova.conns = {}
+	-- интерфейс
+	if UI.screen then
+		pcall(function() UI.screen:Destroy() end)
+		UI.screen = nil
+	end
+	if getgenv then
+		getgenv().NovaMusic = nil
+	end
+	print("[NovaMusic] Выгружен. Спасибо, что слушали.")
+end
+
+--────────────────────────── Публичный API ──────────────────────────
+function Nova.exportAPI()
+	if not (getgenv and type(getgenv) == "function") then return end
+	getgenv().NovaMusic = {
+		version = Nova.version,
+		Toggle = function()
+			if UI.root then
+				UI.root.Visible = not UI.root.Visible
+			end
+		end,
+		Show = function()
+			if UI.root then UI.root.Visible = true end
+		end,
+		Hide = function()
+			if UI.root then UI.root.Visible = false end
+		end,
+		Unload = Nova.unload,
+		API = {
+			play = function(indexOrKey)
+				local t
+				if type(indexOrKey) == "number" then
+					t = Nova.library.tracks[indexOrKey]
+				else
+					t = Nova.library.findByKey(tostring(indexOrKey))
+				end
+				if t then Audio.loadTrack(t, t.index or 1, true) end
+				return t ~= nil
+			end,
+			next = function() Audio.next(true) end,
+			prev = function() Audio.prev() end,
+			pause = function() Audio.pause() end,
+			resume = function() Audio.resume() end,
+			toggle = function() Audio.toggle() end,
+			seek = function(sec) Audio.seekTo(tonumber(sec) or 0) end,
+			setVolume = function(v) Audio.setVolume(tonumber(v) or 0.8) end,
+			toggleMute = function() Audio.toggleMute() end,
+			setEffect = function(name, on) Audio.setEffect(name, on) end,
+			setSpeed = function(s) Audio.setSpeed(tonumber(s) or 1) end,
+			cycleLoop = function() Audio.cycleLoop() end,
+			toggleShuffle = function() Audio.toggleShuffle() end,
+			setKaraoke = function(on) UI.setKaraoke(on and true or false) end,
+			setAccent = function(key)
+				if Theme.accents[key] then
+					Theme.setAccent(key)
+					Nova.config.data.accent = key
+					Nova.config.save()
+				end
+			end,
+			refresh = function() Audio.refreshLibrary() end,
+			getTracks = function()
+				local out = {}
+				for i, t in ipairs(Nova.library.tracks) do
+					out[i] = { title = t.title, artist = t.artist, demo = t.demo, duration = t.duration }
+				end
+				return out
+			end,
+			getState = function()
+				local st = Audio.state
+				return {
+					playing = st.playing, time = st.time, duration = st.duration,
+					track = st.track and st.track.title or nil,
+					volume = Nova.config.data.volume, loop = Nova.config.data.loop,
+					shuffle = Nova.config.data.shuffle,
+				}
+			end,
+		},
+	}
+end
+
+-- Точка входа: запуск под защитой — любая ошибка будет ВИДНА в консоли,
+-- а не «молчаливо» ломать загрузку скрипта
+local okInit, errInit = pcall(Nova.init)
+if not okInit then
+	local msg = "[NovaMusic] Ошибка запуска: " .. tostring(errInit)
+	pcall(function() warn(msg) end)
+	if getgenv and type(getgenv) == "function" then
+		pcall(function() getgenv().NovaMusic = nil end)
+	end
+end
